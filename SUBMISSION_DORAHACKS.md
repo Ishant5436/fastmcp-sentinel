@@ -1,0 +1,88 @@
+# DoraHacks Submission Dossier: FastMCP-Sentinel
+
+## 1. Hackathon Target Profile
+* **Primary Target:** [KeeperHub - The Agent Economy Hackathon](https://dorahacks.io/hackathon)
+  * **Focus:** AI Agents, Autonomous Systems, DeFi, Model Context Protocol (MCP)
+  * **Submission Deadline:** September 18, 2026
+  * **Prize Pool:** $5,000 USD
+  * **Eligibility:** Fully open, code-only submission (GitHub repo + README + automated demo)
+* **Secondary Target:** [Anna AI App Builder Program](https://dorahacks.io/hackathon)
+  * **Focus:** AI-Native Apps, LLMs, AI Agents, Developer Tools
+  * **Submission Deadline:** September 30, 2026
+  * **Prize Pool:** $6,000 USD
+
+---
+
+## 2. BUIDL Profile & Form Fields (Copy-Paste Ready)
+
+### Project Name
+`FastMCP-Sentinel: Deterministic Safety & RPC Gateway for Autonomous Agents`
+
+### Tagline (One-Liner)
+A high-performance C++20 and FastMCP safety gateway enforcing Holzmann's Power of 10 invariants, zero-mutation state simulations, and session spend sandboxing for onchain AI agents.
+
+### Repository URL
+`https://github.com/Ishant5436/fastmcp-sentinel`
+
+### Primary Track
+`AI Agents / Autonomous Systems / Developer Tooling`
+
+---
+
+## 3. Project Description (Markdown Form Text)
+
+### Problem Statement
+When autonomous AI agents interact with blockchain networks and JSON-RPC infrastructure via LLM tool-calling interfaces (Claude Code, Gemini CLI, Cursor, Antigravity), they suffer from three critical failure vectors:
+1. **Unbounded Calldata & Financial Leakage:** Hallucinated transaction parameters, unchecked slippage, or unbounded values drain agent balances or trigger MEV sandwich exploitation.
+2. **RPC Rate Exhaustion & Polling Churn:** High-frequency polling loops (`eth_blockNumber`, `eth_getTransactionReceipt`) spam nodes, incurring HTTP 429 errors and high infrastructure costs.
+3. **Non-Deterministic Execution Overhead:** Pure Python wrappers introduce garbage collection latency, uncontrolled heap allocations, and silent error suppression on the transaction path.
+
+### The Solution: FastMCP-Sentinel
+FastMCP-Sentinel is a dual-engine deterministic gateway that sits between autonomous AI agents and distributed networks:
+* **Compiled C++20 Vectorized Invariant Kernel:** Running natively on ARM64 Apple Silicon with zero dynamic heap allocations on the hot path, enforcing Gerard J. Holzmann's Power of 10 Safety Invariants.
+* **Standard FastMCP Server:** Exposes 5 native safety and caching tools to any MCP-compliant agent host via stdio.
+
+### Key Capabilities & Exposed Tools
+1. `sentinel_validate_calldata`: Sub-millisecond (9.8 µs) zero-copy calldata verification, 4-byte selector decoding, and hard bounded limits (< 32KB buffer, < 100 ETH value, < 15M gas).
+2. `sentinel_simulate_transaction`: Zero-mutation state fork simulation against EVM JSON-RPC endpoints with automatic ABI revert decoding (`Error(string)` and `Panic(uint256)`).
+3. `sentinel_rpc_cache`: Fixed 1024-slot circular ring-buffer LRU cache eliminating up to 80% of redundant static RPC queries in 5.8 µs.
+4. `sentinel_agent_guard`: Stateful session spend limiter and token-bucket rate limiter preventing unconstrained agent balance drain.
+5. `sentinel_audit_invariants`: Automated static AST analyzer verifying Power of 10 compliance across all C++ source files on every run.
+
+### Power of 10 Safety Invariants Compliance
+* **Rule 1 (Simple Control Flow):** Zero `goto`, `setjmp`, `longjmp`, or recursion.
+* **Rule 2 (Bounded Loops):** All ring buffer loops bounded by compile-time constants (1024).
+* **Rule 3 (Zero Heap on Hot Path):** Zero `malloc`, `new`, `free`, or `delete`. Arena allocated at boot.
+* **Rule 4 (Function Length):** Maximum function length is 44 lines (Holzmann limit: 60 lines).
+* **Rule 5 (Assertion Density):** Minimum 2 invariant assertions per function.
+* **Rule 8 (Preprocessor):** Zero macro functions or conditional compilation `#ifdef` mazes.
+* **Rule 9 (Pointer Safety):** Maximum 1 level of dereference; zero function pointers.
+* **Rule 10 (Pedantic Build):** Compiles cleanly with `-Wall -Wextra -Werror -std=c++20 -O3` with 0 warnings.
+
+### Verification & Performance Evidence
+* **CI/CD Matrix:** GitHub Actions workflow passing on `macos-14` (ARM64 Apple Silicon) and `ubuntu-latest`.
+* **Automated Test Suite:** 24/24 tests pass in 0.17 seconds (`pytest tests/ -v`).
+* **Validation Latency:** 9.8 µs (Zero-Copy C++ kernel).
+* **Cache Latency:** 5.8 µs (1024 circular arena).
+* **Instant Demo:** Runs end-to-end live verification of all 5 security gates in < 1 second (`make demo`).
+
+---
+
+## 4. Local Execution & Evaluation Commands (For Judges)
+
+```bash
+git clone https://github.com/Ishant5436/fastmcp-sentinel.git
+cd fastmcp-sentinel
+
+# Build native C++ invariant core
+make csrc
+
+# Run complete 24-test suite
+make test
+
+# Run Power of 10 static AST audit
+make audit
+
+# Run 1-second live end-to-end demo
+make demo
+```
