@@ -2,6 +2,14 @@
 
 **Deterministic Agentic Safety & RPC Gateway**
 
+[![CI](https://github.com/Ishant5436/fastmcp-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/Ishant5436/fastmcp-sentinel/actions/workflows/ci.yml)
+[![Safety Standard](https://img.shields.io/badge/Safety_Invariants-Power_of_10-00E599.svg)](https://github.com/Ishant5436/fastmcp-sentinel)
+[![Architecture: ARM64](https://img.shields.io/badge/Architecture-ARM64%20Apple%20Silicon-blue.svg)](https://github.com/Ishant5436/fastmcp-sentinel)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![C++20](https://img.shields.io/badge/Language-C%2B%2B20-00599C.svg)](https://isocpp.org)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB.svg)](https://python.org)
+[![FastMCP](https://img.shields.io/badge/Protocol-FastMCP%20v1.29-FF6B6B.svg)](https://modelcontextprotocol.io)
+
 FastMCP-Sentinel is a high-performance safety gateway for autonomous AI agents interacting with blockchain networks and JSON-RPC infrastructure. It couples a compiled C++20 vectorized invariant kernel running on ARM64 Apple Silicon with a standard FastMCP server, preventing LLM financial leakage, execution reverts, and RPC rate-limit exhaustion.
 
 ```

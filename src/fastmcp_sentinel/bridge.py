@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import ctypes
 from enum import IntEnum
@@ -82,7 +83,8 @@ class SentinelBridge:
     def __init__(self, lib_path: Optional[str] = None):
         if lib_path is None:
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            lib_path = os.path.join(base_dir, "csrc", "libsentinel_core.dylib")
+            ext = "dylib" if sys.platform == "darwin" else "so"
+            lib_path = os.path.join(base_dir, "csrc", f"libsentinel_core.{ext}")
 
         assert os.path.exists(lib_path), f"Native dynamic library missing at: {lib_path}"
         self._lib = ctypes.CDLL(lib_path)
