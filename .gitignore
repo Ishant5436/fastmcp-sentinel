@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Binaries
+*.dylib
+*.so
+*.o
+
+# OS & Testing
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+*.log
+*.egg-info/
+build/
+dist/

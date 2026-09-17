@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fastmcp-sentinel"
+version = "1.0.0"
+description = "Deterministic Agentic Safety & RPC Gateway for Autonomous Agents"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp==1.29.1",
+    "pydantic>=2.0",
+    "requests>=2.31",
+]
+
+[project.scripts]
+fastmcp-sentinel = "fastmcp_sentinel.cli:main"
