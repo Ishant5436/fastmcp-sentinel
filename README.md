@@ -70,18 +70,18 @@ Built upon Gerard J. Holzmann's **Power of 10 Safety Invariants**, eliminating m
 
 ---
 
-## Power of 10 Safety Invariants Compliance
-
-| Holzmann Invariant | Architectural Implementation | Verification Method | Status |
+## Mission-Critical Architectural Invariants
+ 
+| Architectural Invariant | Institutional Implementation | Verification Method | Status |
 | :--- | :--- | :--- | :--- |
-| **Rule 1: Simple Control Flow** | No `goto`, `setjmp`, `longjmp`, or direct/indirect recursion. | AST pattern analysis (`scripts/audit_safety_invariants.py`) | PASS |
-| **Rule 2: Bounded Loops** | All ring buffer traversals bounded by `SENTINEL_CACHE_CAPACITY` (1024). | Static analyzer bounds verification | PASS |
-| **Rule 3: No Dynamic Memory After Init** | Zero `malloc`, `new`, `free`, or `delete` on hot path. Fixed arena allocated at initialization. | Clang static check + AST grep audit | PASS |
-| **Rule 4: Function Length <= 60 Lines** | Longest C++ function is 44 lines (`sentinel_validate_tx`). | AST line-counting parser | PASS |
-| **Rule 5: Assertion Density >= 2** | Every C++ function contains at least 2 invariant assertions. | AST assert density scanner | PASS |
-| **Rule 8: Limited Preprocessor Use** | Preprocessor restricted to `#include` and header guards. No macro functions. | AST preprocessor check | PASS |
-| **Rule 9: Restrict Pointers** | Maximum 1 level of pointer dereference. No function pointers or `**`. | AST pointer validator | PASS |
-| **Rule 10: Zero Warnings & Pedantic Build** | Compiled with `-Wall -Wextra -Werror -std=c++20 -O3`. | Apple Silicon Clang compiler | PASS |
+| **Control Flow Determinism** | Single-path acyclic execution; zero `goto`, `setjmp`, `longjmp`, or recursion. | AST pattern analysis (`scripts/audit_safety_invariants.py`) | PASS |
+| **Bounded Execution Horizons** | All ring buffer traversals bounded by `SENTINEL_CACHE_CAPACITY` (1024 slots). | Static analyzer bounds verification | PASS |
+| **Zero-Allocation Hot Path** | Zero `malloc`, `new`, `free`, or `delete` on hot path. Fixed arena allocated at initialization. | Clang static check + AST grep audit | PASS |
+| **Atomic Function Geometry** | Maximum C++ function length bounded to 44 lines (`sentinel_validate_tx`) (threshold $\le 60$). | AST line-counting parser | PASS |
+| **Continuous Invariant Assertions** | Minimum 2 runtime assertions per function validating pointer and buffer bounds. | AST assert density scanner | PASS |
+| **Zero-Macro Hygiene** | Preprocessor restricted to `#include` and header guards. Zero macro functions. | AST preprocessor check | PASS |
+| **Single-Indirection Pointer Safety** | Maximum 1 level of pointer dereference. Zero function pointers or `**`. | AST pointer validator | PASS |
+| **Pedantic Static Compilation Gate** | Compiled with `-Wall -Wextra -Werror -std=c++20 -O3` with 0 warnings. | Apple Silicon Clang compiler | PASS |
 
 ---
 

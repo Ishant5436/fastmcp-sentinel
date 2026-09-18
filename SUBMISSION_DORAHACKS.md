@@ -49,15 +49,15 @@ FastMCP-Sentinel is a dual-engine deterministic gateway that sits between autono
 4. `sentinel_agent_guard`: Stateful session spend limiter and token-bucket rate limiter preventing unconstrained agent balance drain.
 5. `sentinel_audit_invariants`: Automated static AST analyzer verifying Power of 10 compliance across all C++ source files on every run.
 
-### Power of 10 Safety Invariants Compliance
-* **Rule 1 (Simple Control Flow):** Zero `goto`, `setjmp`, `longjmp`, or recursion.
-* **Rule 2 (Bounded Loops):** All ring buffer loops bounded by compile-time constants (1024).
-* **Rule 3 (Zero Heap on Hot Path):** Zero `malloc`, `new`, `free`, or `delete`. Arena allocated at boot.
-* **Rule 4 (Function Length):** Maximum function length is 44 lines (Holzmann limit: 60 lines).
-* **Rule 5 (Assertion Density):** Minimum 2 invariant assertions per function.
-* **Rule 8 (Preprocessor):** Zero macro functions or conditional compilation `#ifdef` mazes.
-* **Rule 9 (Pointer Safety):** Maximum 1 level of dereference; zero function pointers.
-* **Rule 10 (Pedantic Build):** Compiles cleanly with `-Wall -Wextra -Werror -std=c++20 -O3` with 0 warnings.
+### Mission-Critical Architectural Invariants
+* **Control Flow Determinism:** Single-path execution guarantees; zero `goto`, `setjmp`, `longjmp`, or recursion.
+* **Bounded Execution Horizons:** All loops and ring-buffer traversals bounded by compile-time constants (1024 slots) ensuring guaranteed $O(1)$ worst-case latency.
+* **Zero-Allocation Hot Path:** Zero dynamic heap allocations (`malloc`, `new`, `free`, `delete`) during runtime; fixed memory arena allocated at initialization.
+* **Atomic Function Geometry:** Maximum function length bounded to $\le 44$ lines for auditable cognitive clarity and instruction cache locality.
+* **Continuous Invariant Assertions:** Minimum 2 runtime assertions per function strictly validating pointer non-nullness and buffer bounds.
+* **Zero-Macro Hygiene:** Zero function-like preprocessor macros or conditional `#ifdef` compilation branches, preventing AST divergence.
+* **Single-Indirection Pointer Safety:** Maximum 1 level of pointer indirection; complete prohibition of raw function pointers.
+* **Pedantic Static Compilation Gate:** 100% warning-free compilation under `-Wall -Wextra -Werror -std=c++20 -O3` validated by static AST analysis.
 
 ### Verification & Performance Evidence
 * **CI/CD Matrix:** GitHub Actions workflow passing on `macos-14` (ARM64 Apple Silicon) and `ubuntu-latest`.
