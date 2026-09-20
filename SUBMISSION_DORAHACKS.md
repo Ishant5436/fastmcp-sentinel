@@ -1,15 +1,13 @@
 # DoraHacks Submission Dossier: FastMCP-Sentinel
 
 ## 1. Hackathon Target Profile
-* **Primary Target:** [KeeperHub - The Agent Economy Hackathon](https://dorahacks.io/hackathon)
-  * **Focus:** AI Agents, Autonomous Systems, DeFi, Model Context Protocol (MCP)
-  * **Submission Deadline:** September 18, 2026
+* **Active Target:** [MunichTech Innovation Hackathon 2026 – Build Applied Solutions for Industry](https://dorahacks.io/hackathon/2019/tracks)
+  * **Tracks:** Applied AI for Real-World Impact (AI Agents & Workflow Automation) & Corporate Challenge Track
+  * **BUIDL Profile:** [#48828](https://dorahacks.io/buidl/48828)
+  * **Eligibility:** Code-only submission with working C++20 engine, tests, and live demo
+* **Co-Target:** [KeeperHub - The Agent Economy Hackathon](https://dorahacks.io/hackathon)
+  * **Focus:** AI Agents, Autonomous Systems, Model Context Protocol (MCP)
   * **Prize Pool:** $5,000 USD
-  * **Eligibility:** Fully open, code-only submission (GitHub repo + README + automated demo)
-* **Secondary Target:** [Anna AI App Builder Program](https://dorahacks.io/hackathon)
-  * **Focus:** AI-Native Apps, LLMs, AI Agents, Developer Tools
-  * **Submission Deadline:** September 30, 2026
-  * **Prize Pool:** $6,000 USD
 
 ---
 
@@ -19,13 +17,13 @@
 `FastMCP-Sentinel: Deterministic Safety & RPC Gateway for Autonomous Agents`
 
 ### Tagline (One-Liner)
-A high-performance C++20 and FastMCP safety gateway enforcing Holzmann's Power of 10 invariants, zero-mutation state simulations, and session spend sandboxing for onchain AI agents.
+A high-performance C++20 and FastMCP safety gateway enforcing Holzmann's Power of 10 invariants, zero-mutation state simulations, and session spend sandboxing for enterprise and onchain AI agents.
 
 ### Repository URL
 `https://github.com/Ishant5436/fastmcp-sentinel`
 
 ### Primary Track
-`AI Agents / Autonomous Systems / Developer Tooling`
+`Applied AI for Real-World Impact / Enterprise AI Integration / AI Agents`
 
 ---
 

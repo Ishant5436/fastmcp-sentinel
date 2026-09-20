@@ -1,6 +1,6 @@
 # FastMCP-Sentinel
 
-**Deterministic Agentic Safety & RPC Gateway**
+**Deterministic Safety Gateway & Sandboxing Kernel for Enterprise, Industrial IoT, and Distributed Autonomous AI Agents**
 
 [![CI](https://github.com/Ishant5436/fastmcp-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/Ishant5436/fastmcp-sentinel/actions/workflows/ci.yml)
 [![Safety Standard](https://img.shields.io/badge/Safety_Invariants-Power_of_10-00E599.svg)](https://github.com/Ishant5436/fastmcp-sentinel)
@@ -10,7 +10,7 @@
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB.svg)](https://python.org)
 [![FastMCP](https://img.shields.io/badge/Protocol-FastMCP%20v1.29-FF6B6B.svg)](https://modelcontextprotocol.io)
 
-FastMCP-Sentinel is a high-performance safety gateway for autonomous AI agents interacting with blockchain networks and JSON-RPC infrastructure. It couples a compiled C++20 vectorized invariant kernel running on ARM64 Apple Silicon with a standard FastMCP server, preventing LLM financial leakage, execution reverts, and RPC rate-limit exhaustion.
+FastMCP-Sentinel is a high-performance, deterministic safety gateway for autonomous AI agents. Built for mission-critical enterprise workflows, industrial IoT actuator interfaces, and distributed blockchain networks, it couples a compiled C++20 vectorized invariant kernel running on ARM64 Apple Silicon with a standard FastMCP server. It prevents LLM hallucinations, financial leakage, out-of-bounds actuator commands, and infrastructure rate-limit exhaustion.
 
 ```
 +-------------------------------------------------------------------+
@@ -24,7 +24,7 @@ FastMCP-Sentinel is a high-performance safety gateway for autonomous AI agents i
 |                        FastMCP-Sentinel                           |
 |  +---------------------------+     +----------------------------+ |
 |  |   Stateful Agent Guard    |     |  Zero-Mutation Simulator   | |
-|  |   - Cumulative spend cap  |     |  - Pre-flight eth_call     | |
+|  |   - Cumulative spend cap  |     |  - Pre-flight dry-run      | |
 |  |   - Token-bucket limiter  |     |  - Revert reason decoding  | |
 |  +---------------------------+     +----------------------------+ |
 |                                |                                  |
@@ -41,27 +41,31 @@ FastMCP-Sentinel is a high-performance safety gateway for autonomous AI agents i
                                   |
                                   v
 +-------------------------------------------------------------------+
-|                 Onchain Networks & RPC Endpoints                  |
-|                 (Arbitrum, Ethereum, Solana L1)                   |
+|            External Networks, APIs & Industrial Actuators         |
+|     (Enterprise ERP / SCADA IoT / EVM & Distributed RPCs)        |
 +-------------------------------------------------------------------+
 ```
 
 ---
 
-## Sponsor Track Alignment
+## Strategic Track & Application Alignment
 
-FastMCP-Sentinel is engineered to simultaneously target three key hackathon tracks:
+FastMCP-Sentinel is engineered to target both enterprise industrial challenges and high-stakes autonomous agent infrastructure:
 
-### 1. Agentic AI & Autonomous Systems
-Autonomous agents often issue malformed or unbounded transactions when calling smart contract functions. FastMCP-Sentinel acts as a deterministic policy firewall between LLM tool-calling logic and the network:
-* **Spend Sandboxing:** Enforces per-session cumulative loss limits and single-transaction caps.
-* **Token-Bucket Throttling:** Prevents agent polling loops from generating infinite RPC queries.
-* **Universal FastMCP Protocol:** Compatible with any MCP-enabled host (Claude Code, Antigravity, Cursor).
+### 1. Applied AI for Real-World Impact & Enterprise Integration
+Autonomous LLM agents interacting with enterprise APIs (ERP, database mutations, cloud infrastructure) suffer from catastrophic hallucinated parameters. FastMCP-Sentinel serves as a deterministic policy sandbox:
+* **Spend & Parameter Sandboxing:** Enforces per-session cumulative operation caps, single-call parameter limits, and whitelisted destination endpoints.
+* **Token-Bucket Throttling:** Restricts automated agent polling loops, preventing accidental DDoS against rate-limited enterprise services.
+* **Universal FastMCP Protocol:** Plugs natively into any MCP-compliant agent host (Claude Code, Antigravity, Cursor, LangChain).
 
-### 2. Developer Tooling & Infrastructure
-* **Vectorized C++ Engine:** Validation kernel executes in under 15 microseconds per call on ARM64.
-* **Sub-Millisecond Ring Cache:** Fixed 1024-slot circular LRU cache eliminates up to 80% of redundant static RPC reads (`eth_chainId`, `eth_blockNumber`, contract constants).
-* **Automated AST Audit Tooling:** Includes a standalone static analyzer (`scripts/audit_safety_invariants.py`) wired directly into build and CI targets.
+### 2. Industrial AI, IoT & Safety-Critical Actuation
+In robotic process automation and Industrial IoT (SCADA, PLC, actuator controllers), out-of-range tool calls can cause physical damage or process disruption:
+* **Vectorized C++ Kernel:** Sub-15 microsecond zero-copy parameter validation on ARM64 ensures hard real-time execution bounds compatible with low-latency control loops.
+* **Pre-Flight Invariant Simulation:** Every mutating command is validated in a zero-mutation state fork before physical or transactional dispatch.
+
+### 3. Developer Tooling & Safety-Critical Verification
+* **Sub-Millisecond Ring Cache:** Fixed 1024-slot circular LRU cache eliminates up to 80% of redundant static state reads.
+* **Automated AST Audit Tooling:** Includes a standalone static analyzer (`scripts/audit_safety_invariants.py`) mechanically validating Holzmann Power of 10 invariants.
 
 ### 3. Security & Safety-Critical Verification
 Built upon Gerard J. Holzmann's **Power of 10 Safety Invariants**, eliminating memory corruption and non-deterministic behavior:
