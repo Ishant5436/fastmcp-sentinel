@@ -145,6 +145,20 @@ Executes mechanical static AST analysis of the C++ codebase, verifying Power of 
 * Python 3.12 (`uv` recommended)
 
 ### Build & Run Tests (< 2 Seconds)
+
+#### Option A: Build via CMake
+```bash
+# Configure and build native C++ core
+cmake -B build && cmake --build build
+
+# Run Power of 10 AST safety audit
+cmake --build build --target audit
+
+# Run complete test suite (24 tests)
+cmake --build build --target run_tests
+```
+
+#### Option B: Build via Make
 ```bash
 # Build native C++ dynamic library
 make csrc

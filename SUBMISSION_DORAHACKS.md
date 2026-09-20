@@ -72,15 +72,14 @@ FastMCP-Sentinel is a dual-engine deterministic gateway that sits between autono
 git clone https://github.com/Ishant5436/fastmcp-sentinel.git
 cd fastmcp-sentinel
 
-# Build native C++ invariant core
+# Option A: Modern CMake Workflow
+cmake -B build && cmake --build build
+cmake --build build --target audit
+cmake --build build --target run_tests
+
+# Option B: Classic Make Workflow
 make csrc
-
-# Run complete 24-test suite
 make test
-
-# Run Power of 10 static AST audit
 make audit
-
-# Run 1-second live end-to-end demo
 make demo
 ```

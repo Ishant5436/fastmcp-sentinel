@@ -1,12 +1,15 @@
 PYTHON ?= ./venv/bin/python
 PYTEST ?= $(PYTHON) -m pytest
 
-.PHONY: all csrc test audit demo serve clean
+.PHONY: all csrc cmake-build test audit demo serve clean
 
 all: csrc test audit
 
 csrc:
 	$(MAKE) -C csrc
+
+cmake-build:
+	cmake -B build && cmake --build build
 
 test: csrc
 	$(PYTEST) tests/ -v
