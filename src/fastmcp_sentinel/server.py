@@ -20,6 +20,12 @@ from fastmcp_sentinel.bridge import get_bridge
 from fastmcp_sentinel.simulation import EvmSimulator
 from fastmcp_sentinel.guard import StatefulAgentGuard, GuardConfig
 from fastmcp_sentinel.audit import SafetyInvariantAuditor
+from fastmcp_sentinel.config import (
+    ARC_CHAIN_ID,
+    ARC_RPC_URL,
+    ARC_GAS_TOKEN,
+    base_units_to_usdc,
+)
 
 # Initialize FastMCP Server
 mcp = FastMCP("fastmcp-sentinel")
@@ -74,15 +80,19 @@ def sentinel_simulate_transaction(
     Returns execution success, decoded revert reason, exact gas consumed, and return data
     before allowing an agent to sign or broadcast.
     """
+    target_rpc = rpc_url.strip() if rpc_url.strip() else ARC_RPC_URL
     sim = _simulator.simulate(
         to_address=to_address,
         from_address=from_address,
         value_wei=value_wei,
         data=data,
         gas=gas,
-        rpc_url=rpc_url,
+        rpc_url=target_rpc,
     )
-    return sim.to_dict()
+    res = sim.to_dict()
+    res["target_rpc"] = target_rpc
+    res["chain_id"] = ARC_CHAIN_ID if target_rpc == ARC_RPC_URL else None
+    return res
 
 
 @mcp.tool()
@@ -140,11 +150,19 @@ def sentinel_agent_guard(
         return {"status": "recorded", "tx_hash": tx_hash, "value_wei": value_wei}
     elif act == "status":
         return _guard.get_status()
+    elif act == "arc_status":
+        status = _guard.get_status()
+        status["network"] = "Arc Mainnet"
+        status["chain_id"] = ARC_CHAIN_ID
+        status["gas_asset"] = ARC_GAS_TOKEN
+        status["session_spend_usdc"] = base_units_to_usdc(status.get("session_spend_wei", 0))
+        status["remaining_session_budget_usdc"] = base_units_to_usdc(status.get("remaining_session_budget_wei", 0))
+        return status
     elif act == "reset":
         _guard.reset_session()
         return {"status": "reset"}
     else:
-        return {"error": f"Unknown guard action '{action}'. Valid actions: 'check', 'record', 'status', 'reset'"}
+        return {"error": f"Unknown guard action '{action}'. Valid actions: 'check', 'record', 'status', 'arc_status', 'reset'"}
 
 
 @mcp.tool()

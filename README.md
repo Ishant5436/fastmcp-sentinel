@@ -4,18 +4,20 @@
 
 [![CI](https://github.com/Ishant5436/fastmcp-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/Ishant5436/fastmcp-sentinel/actions/workflows/ci.yml)
 [![Safety Standard](https://img.shields.io/badge/Safety_Invariants-Power_of_10-00E599.svg)](https://github.com/Ishant5436/fastmcp-sentinel)
+[![Arc Mainnet](https://img.shields.io/badge/Network-Arc%20Mainnet%20(5042)-00F0FF.svg)](https://arc.io)
+[![Gas Token](https://img.shields.io/badge/Gas-Native%20USDC-2775CA.svg)](https://circle.com)
 [![Architecture: ARM64](https://img.shields.io/badge/Architecture-ARM64%20Apple%20Silicon-blue.svg)](https://github.com/Ishant5436/fastmcp-sentinel)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![C++20](https://img.shields.io/badge/Language-C%2B%2B20-00599C.svg)](https://isocpp.org)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB.svg)](https://python.org)
 [![FastMCP](https://img.shields.io/badge/Protocol-FastMCP%20v1.29-FF6B6B.svg)](https://modelcontextprotocol.io)
 
-FastMCP-Sentinel is a high-performance, deterministic safety gateway for autonomous AI agents. Built for mission-critical enterprise workflows, industrial IoT actuator interfaces, and distributed blockchain networks, it couples a compiled C++20 vectorized invariant kernel running on ARM64 Apple Silicon with a standard FastMCP server. It prevents LLM hallucinations, financial leakage, out-of-bounds actuator commands, and infrastructure rate-limit exhaustion.
+FastMCP-Sentinel is a high-performance, deterministic safety gateway for autonomous AI agents. Built for mission-critical enterprise workflows, industrial IoT actuator interfaces, and Arc Mainnet smart contract execution, it couples a compiled C++20 vectorized invariant kernel running on ARM64 Apple Silicon with a standard FastMCP server. It prevents agent parameter errors, unauthorized financial leakage, out-of-bounds actuator commands, and infrastructure rate-limit exhaustion.
 
 ```
 +-------------------------------------------------------------------+
 |                   Autonomous Agent Environment                    |
-|             (Claude Code / Gemini CLI / Cursor / AGY)             |
+|                (FastMCP Client / IDE / CLI Engine)                |
 +-------------------------------------------------------------------+
                                   |
                                   | MCP stdio protocol
@@ -52,11 +54,12 @@ FastMCP-Sentinel is a high-performance, deterministic safety gateway for autonom
 
 FastMCP-Sentinel is engineered to target both enterprise industrial challenges and high-stakes autonomous agent infrastructure:
 
-### 1. Applied AI for Real-World Impact & Enterprise Integration
-Autonomous LLM agents interacting with enterprise APIs (ERP, database mutations, cloud infrastructure) suffer from catastrophic hallucinated parameters. FastMCP-Sentinel serves as a deterministic policy sandbox:
-* **Spend & Parameter Sandboxing:** Enforces per-session cumulative operation caps, single-call parameter limits, and whitelisted destination endpoints.
-* **Token-Bucket Throttling:** Restricts automated agent polling loops, preventing accidental DDoS against rate-limited enterprise services.
-* **Universal FastMCP Protocol:** Plugs natively into any MCP-compliant agent host (Claude Code, Antigravity, Cursor, LangChain).
+### 1. Arc Mainnet & Web3 Autonomous Execution
+Autonomous agents interacting with Arc Mainnet (Chain ID 5042) require deterministic pre-execution guarantees to protect native USDC balances:
+* **Zero-Mutation Revert Interception:** Pre-flights calldata and state transitions via local zero-mutation fork simulation before broadcast, preventing wasted USDC gas on reverted calls.
+* **Native USDC Spend Sandboxing:** Enforces per-session cumulative USDC caps ($50 USDC) and per-transaction limits ($10 USDC).
+* **Token-Bucket Throttling:** Restricts automated agent polling loops, preventing accidental transaction bursts against Arc JSON-RPC nodes.
+* **Universal FastMCP Protocol:** Plugs natively into any standard FastMCP-compliant agent host.
 
 ### 2. Industrial AI, IoT & Safety-Critical Actuation
 In robotic process automation and Industrial IoT (SCADA, PLC, actuator controllers), out-of-range tool calls can cause physical damage or process disruption:
@@ -177,7 +180,7 @@ make demo
 
 ## MCP Server Configuration
 
-To register FastMCP-Sentinel with your AI assistant or agent host, add the following entry to your `mcp_config.json` (or `claude_desktop_config.json`):
+To register FastMCP-Sentinel with your agent host, add the following entry to your `mcp_config.json`:
 
 ```json
 {
