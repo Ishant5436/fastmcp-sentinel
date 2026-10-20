@@ -101,3 +101,56 @@ def test_address_filtering():
     res_w = guard.check_transaction(target_address=whitelisted, value_wei=0)
     assert res_w.allowed is True
     assert res_w.status_code == GuardStatusCode.OK
+
+
+def test_negative_values_rejected():
+    guard = StatefulAgentGuard(GuardConfig(max_single_tx_wei=10**18, max_session_spend_wei=2 * 10**18))
+    res = guard.check_transaction("0x1111111111111111111111111111111111111111", value_wei=-10**18)
+    assert res.allowed is False
+    assert res.status_code == GuardStatusCode.INVALID_VALUE
+    with pytest.raises(ValueError):
+        guard.record_transaction("0xbad", -5 * 10**18)
+    assert guard.get_status()["session_spend_wei"] == 0
+
+
+def test_reservations_count_against_budget():
+    guard = StatefulAgentGuard(GuardConfig(max_single_tx_wei=10**18, max_session_spend_wei=15 * 10**17))
+    to = "0x1111111111111111111111111111111111111111"
+    res1, rid1 = guard.reserve_transaction(to, 10**18)
+    assert res1.allowed and rid1
+    # Second reservation would exceed 1.5 even though nothing was "recorded"
+    res2, rid2 = guard.reserve_transaction(to, 10**18)
+    assert res2.allowed is False and rid2 is None
+    assert res2.status_code == GuardStatusCode.EXCEEDS_SESSION_LIMIT
+
+    assert guard.release_reservation(rid1) is True
+    assert guard.release_reservation(rid1) is False
+    res3, rid3 = guard.reserve_transaction(to, 10**18)
+    assert res3.allowed
+    assert guard.confirm_reservation(rid3, "0xfeed") is True
+    status = guard.get_status()
+    assert status["session_spend_wei"] == 10**18
+    assert status["transactions_recorded"] == 1
+    assert status["reserved_wei"] == 0
+
+
+def test_concurrent_reservations_never_exceed_budget():
+    import threading
+
+    guard = StatefulAgentGuard(
+        GuardConfig(max_single_tx_wei=10**18, max_session_spend_wei=5 * 10**18, burst_limit=1000, rate_limit_per_minute=60000)
+    )
+    granted = []
+
+    def worker():
+        res, rid = guard.reserve_transaction("0x1111111111111111111111111111111111111111", 10**18)
+        if rid:
+            granted.append(rid)
+
+    threads = [threading.Thread(target=worker) for _ in range(50)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(granted) == 5
+    assert guard.get_status()["reserved_wei"] == 5 * 10**18

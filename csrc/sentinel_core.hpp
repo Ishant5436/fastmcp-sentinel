@@ -14,8 +14,9 @@ constexpr size_t SENTINEL_CACHE_CAPACITY = 1024;
 constexpr size_t SENTINEL_MAX_KEY_LEN = 128;
 constexpr size_t SENTINEL_MAX_VAL_LEN = 512;
 constexpr uint64_t SENTINEL_MAX_GAS_LIMIT = 15000000ULL;
-// Value measured in Gwei (1 ETH = 10^9 Gwei) to prevent 64-bit integer overflow
-constexpr uint64_t SENTINEL_MAX_VALUE_GWEI = 100ULL * 1000000000ULL; // 100 ETH ceiling
+// Value measured in Gwei-scaled native units (1 unit = 10^9 Gwei) to prevent 64-bit overflow.
+// Arc's native USDC uses 18 decimals like ETH, so 100 units is 100 USDC on Arc (100 ETH elsewhere).
+constexpr uint64_t SENTINEL_MAX_VALUE_GWEI = 100ULL * 1000000000ULL; // 100 native-unit ceiling
 
 // Error & Status Codes
 enum SentinelStatusCode : int {
@@ -27,7 +28,8 @@ enum SentinelStatusCode : int {
     SENTINEL_ERR_REENTRANCY_SIGNATURE = -5,
     SENTINEL_ERR_CACHE_FULL = -6,
     SENTINEL_ERR_CACHE_NOT_FOUND = -7,
-    SENTINEL_ERR_BUFFER_TOO_SMALL = -8
+    SENTINEL_ERR_BUFFER_TOO_SMALL = -8,
+    SENTINEL_ERR_CACHE_EXPIRED = -9
 };
 
 struct SentinelValidationResult {
@@ -73,7 +75,9 @@ int sentinel_cache_get(
     const SentinelMemoryArena* arena,
     const char* key,
     char* out_value,
-    size_t out_max_len
+    size_t out_max_len,
+    uint64_t now_ns,
+    uint64_t max_age_ns
 );
 
 #ifdef __cplusplus

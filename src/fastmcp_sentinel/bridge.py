@@ -2,9 +2,17 @@ import os
 import sys
 import time
 import ctypes
+from decimal import Decimal
 from enum import IntEnum
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
+
+
+# Mirrors the compile-time constants in csrc/sentinel_core.hpp
+_CACHE_CAPACITY = 1024
+_CACHE_MAX_KEY_LEN = 128
+_CACHE_MAX_VAL_LEN = 512
+_UINT64_MAX = 2**64 - 1
 
 
 class SentinelStatusCode(IntEnum):
@@ -17,6 +25,7 @@ class SentinelStatusCode(IntEnum):
     ERR_CACHE_FULL = -6
     ERR_CACHE_NOT_FOUND = -7
     ERR_BUFFER_TOO_SMALL = -8
+    ERR_CACHE_EXPIRED = -9
 
 
 class SentinelValidationResult(ctypes.Structure):
@@ -63,8 +72,8 @@ class ValidationSummary:
 
 class SentinelCacheEntry(ctypes.Structure):
     _fields_ = [
-        ("key", ctypes.c_char * 128),
-        ("value", ctypes.c_char * 512),
+        ("key", ctypes.c_char * _CACHE_MAX_KEY_LEN),
+        ("value", ctypes.c_char * _CACHE_MAX_VAL_LEN),
         ("timestamp_ns", ctypes.c_uint64),
         ("is_valid", ctypes.c_uint8),
     ]
@@ -72,7 +81,7 @@ class SentinelCacheEntry(ctypes.Structure):
 
 class SentinelMemoryArena(ctypes.Structure):
     _fields_ = [
-        ("entries", SentinelCacheEntry * 1024),
+        ("entries", SentinelCacheEntry * _CACHE_CAPACITY),
         ("count", ctypes.c_size_t),
         ("next_idx", ctypes.c_size_t),
         ("is_initialized", ctypes.c_uint8),
@@ -119,6 +128,8 @@ class SentinelBridge:
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_size_t,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
         ]
         self._lib.sentinel_cache_get.restype = ctypes.c_int
 
@@ -151,8 +162,11 @@ class SentinelBridge:
         c_calldata = bytes(calldata)
         c_len = len(c_calldata)
 
-        # Scale wei to Gwei (1 ETH = 10^9 Gwei) to prevent 64-bit integer overflow
-        val_gwei = value_wei // 10**9 if value_wei >= 10**9 else (1 if value_wei > 0 else 0)
+        assert value_wei >= 0, "value_wei cannot be negative"
+
+        # Scale wei to Gwei to prevent 64-bit overflow. Round up so a value just above the
+        # ceiling cannot slip under it, and saturate instead of letting c_uint64 wrap to 0.
+        val_gwei = min((value_wei + 10**9 - 1) // 10**9, _UINT64_MAX)
 
         self._lib.sentinel_validate_tx(
             c_to,
@@ -167,11 +181,20 @@ class SentinelBridge:
     def validate_transaction(
         self,
         to_address: str,
-        value_eth: float = 0.0,
+        value_native: float = 0.0,
         gas_limit: int = 100000,
         calldata_hex: str = "0x",
+        value_eth: Optional[float] = None,
+        value_wei: Optional[int] = None,
     ) -> ValidationSummary:
-        """High-level transaction validation with latency profiling."""
+        """High-level transaction validation with latency profiling.
+
+        `value_native` is in whole native units (USDC on Arc, ETH on Ethereum); both use
+        18 decimals. `value_eth` is a deprecated alias kept for backward compatibility.
+        Pass `value_wei` instead to supply an exact integer amount.
+        """
+        if value_eth is not None:
+            value_native = value_eth
         t0 = time.perf_counter_ns()
 
         clean_hex = calldata_hex.strip()
@@ -181,7 +204,8 @@ class SentinelBridge:
             clean_hex = "0" + clean_hex
 
         calldata_bytes = bytes.fromhex(clean_hex) if clean_hex else b""
-        value_wei = int(value_eth * 10**18)
+        if value_wei is None:
+            value_wei = int(Decimal(str(value_native)) * 10**18)
 
         raw_res = self.validate_tx(
             to_address=to_address,
@@ -222,14 +246,17 @@ class SentinelBridge:
         )
         return rc == 0
 
-    def cache_get(self, key: str) -> Optional[str]:
+    def cache_get(self, key: str, max_age_ns: int = 0) -> Optional[str]:
+        """Return the cached value, or None on a miss or if older than max_age_ns (0 = no expiry)."""
         assert self.is_initialized, "Bridge arena is not initialized"
-        buf = ctypes.create_string_buffer(512)
+        buf = ctypes.create_string_buffer(_CACHE_MAX_VAL_LEN)
         rc = self._lib.sentinel_cache_get(
             ctypes.byref(self._arena),
             key.encode("utf-8"),
             buf,
-            ctypes.c_size_t(512),
+            ctypes.c_size_t(_CACHE_MAX_VAL_LEN),
+            ctypes.c_uint64(time.time_ns()),
+            ctypes.c_uint64(max_age_ns),
         )
         if rc == 0:
             return buf.value.decode("utf-8", errors="replace")
@@ -237,7 +264,7 @@ class SentinelBridge:
 
     def cache_stats(self) -> Dict[str, Any]:
         return {
-            "capacity": 1024,
+            "capacity": _CACHE_CAPACITY,
             "count": self._arena.count,
             "next_idx": self._arena.next_idx,
             "is_initialized": bool(self._arena.is_initialized),

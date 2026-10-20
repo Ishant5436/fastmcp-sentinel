@@ -59,7 +59,7 @@ int sentinel_validate_tx(
 
     if (value_gwei > SENTINEL_MAX_VALUE_GWEI) {
         result->status_code = SENTINEL_ERR_VALUE_EXCEEDED;
-        std::strncpy(result->reason, "Transaction value exceeds 100 ETH ceiling", sizeof(result->reason) - 1);
+        std::strncpy(result->reason, "Transaction value exceeds 100 native-unit ceiling", sizeof(result->reason) - 1);
         return SENTINEL_ERR_VALUE_EXCEEDED;
     }
 
@@ -78,6 +78,18 @@ int sentinel_validate_tx(
     return SENTINEL_OK;
 }
 
+static size_t find_slot(const SentinelMemoryArena* arena, const char* key) {
+    assert(arena != nullptr);
+    assert(key != nullptr);
+    for (size_t i = 0; i < arena->count && i < SENTINEL_CACHE_CAPACITY; ++i) {
+        const SentinelCacheEntry* entry = &arena->entries[i];
+        if (entry->is_valid == 1 && std::strncmp(entry->key, key, SENTINEL_MAX_KEY_LEN) == 0) {
+            return i;
+        }
+    }
+    return SENTINEL_CACHE_CAPACITY;
+}
+
 int sentinel_cache_put(
     SentinelMemoryArena* arena,
     const char* key,
@@ -90,22 +102,34 @@ int sentinel_cache_put(
     if (arena == nullptr || key == nullptr || value == nullptr || arena->is_initialized != 1) {
         return SENTINEL_ERR_NULL_PTR;
     }
+    // Reject oversized entries instead of truncating: a truncated key could alias another key.
+    if (strnlen(key, SENTINEL_MAX_KEY_LEN) >= SENTINEL_MAX_KEY_LEN ||
+        strnlen(value, SENTINEL_MAX_VAL_LEN) >= SENTINEL_MAX_VAL_LEN) {
+        return SENTINEL_ERR_BUFFER_TOO_SMALL;
+    }
 
-    const size_t slot = arena->next_idx % SENTINEL_CACHE_CAPACITY;
+    // Overwrite an existing key in place; otherwise evict the oldest slot (FIFO ring).
+    size_t slot = find_slot(arena, key);
+    const bool is_new_key = (slot == SENTINEL_CACHE_CAPACITY);
+    if (is_new_key) {
+        slot = arena->next_idx % SENTINEL_CACHE_CAPACITY;
+    }
     SentinelCacheEntry* entry = &arena->entries[slot];
-    
+
     std::strncpy(entry->key, key, SENTINEL_MAX_KEY_LEN - 1);
     entry->key[SENTINEL_MAX_KEY_LEN - 1] = '\0';
-    
+
     std::strncpy(entry->value, value, SENTINEL_MAX_VAL_LEN - 1);
     entry->value[SENTINEL_MAX_VAL_LEN - 1] = '\0';
-    
+
     entry->timestamp_ns = timestamp_ns;
     entry->is_valid = 1;
 
-    arena->next_idx = (slot + 1) % SENTINEL_CACHE_CAPACITY;
-    if (arena->count < SENTINEL_CACHE_CAPACITY) {
-        arena->count++;
+    if (is_new_key) {
+        arena->next_idx = (slot + 1) % SENTINEL_CACHE_CAPACITY;
+        if (arena->count < SENTINEL_CACHE_CAPACITY) {
+            arena->count++;
+        }
     }
     return SENTINEL_OK;
 }
@@ -114,7 +138,9 @@ int sentinel_cache_get(
     const SentinelMemoryArena* arena,
     const char* key,
     char* out_value,
-    size_t out_max_len
+    size_t out_max_len,
+    uint64_t now_ns,
+    uint64_t max_age_ns
 ) {
     assert(arena != nullptr);
     assert(key != nullptr && out_value != nullptr);
@@ -123,13 +149,20 @@ int sentinel_cache_get(
         return SENTINEL_ERR_NULL_PTR;
     }
 
-    for (size_t i = 0; i < arena->count && i < SENTINEL_CACHE_CAPACITY; ++i) {
-        const SentinelCacheEntry* entry = &arena->entries[i];
-        if (entry->is_valid == 1 && std::strncmp(entry->key, key, SENTINEL_MAX_KEY_LEN) == 0) {
-            std::strncpy(out_value, entry->value, out_max_len - 1);
-            out_value[out_max_len - 1] = '\0';
-            return SENTINEL_OK;
-        }
+    const size_t slot = find_slot(arena, key);
+    if (slot == SENTINEL_CACHE_CAPACITY) {
+        return SENTINEL_ERR_CACHE_NOT_FOUND;
     }
-    return SENTINEL_ERR_CACHE_NOT_FOUND;
+    const SentinelCacheEntry* entry = &arena->entries[slot];
+
+    // max_age_ns == 0 disables expiry; otherwise stale entries are reported, not served.
+    if (max_age_ns > 0 && now_ns > entry->timestamp_ns && now_ns - entry->timestamp_ns > max_age_ns) {
+        return SENTINEL_ERR_CACHE_EXPIRED;
+    }
+    if (strnlen(entry->value, SENTINEL_MAX_VAL_LEN) >= out_max_len) {
+        return SENTINEL_ERR_BUFFER_TOO_SMALL;
+    }
+    std::strncpy(out_value, entry->value, out_max_len - 1);
+    out_value[out_max_len - 1] = '\0';
+    return SENTINEL_OK;
 }

@@ -68,6 +68,7 @@ class TransactionSimulator:
         data: str,
         from_addr: Optional[str] = None,
         value_wei: int = 0,
+        gas: int = 0,
     ) -> SimulationResult:
         if self.is_mock:
             if "mock_revert" in data or "revert" in self.rpc_url:
@@ -95,34 +96,33 @@ class TransactionSimulator:
         }
         if from_addr:
             tx_obj["from"] = from_addr
+        if gas > 0:
+            tx_obj["gas"] = hex(gas)
 
         try:
-            # 1. Simulate via eth_call
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "eth_call",
-                "params": [tx_obj, "latest"],
-            }
-            resp = requests.post(self.rpc_url, json=payload, timeout=self.timeout)
-            resp.raise_for_status()
-            res_json = resp.json()
-
+            # 1. Simulate via eth_call against the latest state (read-only, no mutation)
+            res_json = self._rpc("eth_call", [tx_obj, "latest"])
             if "error" in res_json:
-                err_data = res_json["error"].get("data", "")
-                reason = self.decode_revert_reason(str(err_data))
+                return self._revert_result(res_json["error"])
+            return_data = res_json.get("result", "0x")
+
+            # 2. Measure gas with eth_estimateGas instead of reporting a fixed number
+            est_json = self._rpc("eth_estimateGas", [tx_obj])
+            if "error" in est_json:
+                return self._revert_result(est_json["error"])
+            gas_used = int(est_json.get("result", "0x0"), 16)
+
+            if gas > 0 and gas_used > gas:
                 return SimulationResult(
                     success=False,
-                    gas_used=0,
-                    return_data=str(err_data),
-                    revert_reason=reason,
+                    gas_used=gas_used,
+                    return_data=return_data,
+                    revert_reason=f"Out of gas: estimated {gas_used} exceeds gas limit {gas}",
                     is_mock=False,
                 )
-
-            return_data = res_json.get("result", "0x")
             return SimulationResult(
                 success=True,
-                gas_used=45000,
+                gas_used=gas_used,
                 return_data=return_data,
                 revert_reason=None,
                 is_mock=False,
@@ -136,16 +136,50 @@ class TransactionSimulator:
                 is_mock=False,
             )
 
+    def _rpc(self, method: str, params: list) -> Dict[str, Any]:
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        resp = requests.post(self.rpc_url, json=payload, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _revert_result(self, error: Any) -> SimulationResult:
+        """Build a failed result from a JSON-RPC error object.
+
+        Nodes report revert data as `error.data` (hex string), nested as `error.data.data`,
+        or only in `error.message`, depending on the client.
+        """
+        if not isinstance(error, dict):
+            error = {"message": str(error)}
+        err_data = error.get("data", "")
+        if isinstance(err_data, dict):
+            err_data = err_data.get("data", "")
+        err_data = str(err_data or "")
+
+        if err_data.startswith("0x") and len(err_data) > 2:
+            reason = self.decode_revert_reason(err_data)
+        else:
+            reason = str(error.get("message") or "Execution reverted without reason")
+        return SimulationResult(
+            success=False,
+            gas_used=0,
+            return_data=err_data or "0x",
+            revert_reason=reason,
+            is_mock=False,
+        )
+
     def simulate(
         self,
         to_address: str,
         from_address: str = "0x0000000000000000000000000000000000000000",
         value_wei: int = 0,
         data: str = "0x",
-        gas: int = 21000,
+        gas: int = 0,
         rpc_url: str = "",
     ) -> SimulationResult:
-        """High-level dispatch supporting runtime RPC URL overrides."""
+        """High-level dispatch supporting runtime RPC URL overrides.
+
+        `gas` is the caller's gas limit; 0 means no limit (the node estimates).
+        """
         target_sim = self
         if rpc_url and rpc_url != self.rpc_url:
             target_sim = TransactionSimulator(rpc_url=rpc_url, timeout=self.timeout)
@@ -154,6 +188,7 @@ class TransactionSimulator:
             data=data,
             from_addr=from_address,
             value_wei=value_wei,
+            gas=gas,
         )
 
 
