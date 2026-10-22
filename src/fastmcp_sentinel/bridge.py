@@ -1,10 +1,27 @@
-import os
-import sys
-import time
+"""ctypes bridge to the C++ invariant core (``csrc/sentinel_core.cpp``)."""
+
+from __future__ import annotations
+
 import ctypes
-from enum import IntEnum
-from typing import Optional, Dict, Any
+import math
+import threading
+import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from enum import IntEnum
+from pathlib import Path
+from typing import Any, Dict
+
+from fastmcp_sentinel.paths import find_library
+
+# Must match SENTINEL_ABI_VERSION in csrc/sentinel_core.hpp.
+EXPECTED_ABI_VERSION = 2
+CACHE_CAPACITY = 1024
+MAX_KEY_LEN = 128
+MAX_VAL_LEN = 512
+UINT64_MAX = 2**64 - 1
+WEI_PER_GWEI = 10**9
+WEI_PER_ETH = 10**18
 
 
 class SentinelStatusCode(IntEnum):
@@ -17,6 +34,10 @@ class SentinelStatusCode(IntEnum):
     ERR_CACHE_FULL = -6
     ERR_CACHE_NOT_FOUND = -7
     ERR_BUFFER_TOO_SMALL = -8
+    ERR_INVALID_ADDRESS = -9
+    ERR_MALFORMED_CALLDATA = -10
+    ERR_INVALID_ARGUMENT = -11
+    ERR_NOT_INITIALIZED = -12
 
 
 class SentinelValidationResult(ctypes.Structure):
@@ -30,11 +51,11 @@ class SentinelValidationResult(ctypes.Structure):
 
     @property
     def reason_str(self) -> str:
-        return self.reason.decode("utf-8", errors="replace").rstrip("\x00")
+        return bytes(self.reason).decode("utf-8", errors="replace").rstrip("\x00")
 
     @property
     def value_wei(self) -> int:
-        return int(self.value_gwei) * 10**9
+        return int(self.value_gwei) * WEI_PER_GWEI
 
 
 @dataclass
@@ -63,40 +84,98 @@ class ValidationSummary:
 
 class SentinelCacheEntry(ctypes.Structure):
     _fields_ = [
-        ("key", ctypes.c_char * 128),
-        ("value", ctypes.c_char * 512),
-        ("timestamp_ns", ctypes.c_uint64),
+        ("key", ctypes.c_char * MAX_KEY_LEN),
+        ("value", ctypes.c_char * MAX_VAL_LEN),
+        ("expires_at_ns", ctypes.c_uint64),
         ("is_valid", ctypes.c_uint8),
     ]
 
 
 class SentinelMemoryArena(ctypes.Structure):
     _fields_ = [
-        ("entries", SentinelCacheEntry * 1024),
+        ("entries", SentinelCacheEntry * CACHE_CAPACITY),
         ("count", ctypes.c_size_t),
         ("next_idx", ctypes.c_size_t),
         ("is_initialized", ctypes.c_uint8),
     ]
 
 
+class NativeLibraryError(RuntimeError):
+    """The native library is missing or incompatible with this bridge."""
+
+
+def _status_name(code: int) -> str:
+    try:
+        return SentinelStatusCode(code).name
+    except ValueError:
+        return f"UNKNOWN({code})"
+
+
+def _eth_to_wei(value_eth: float | int | str) -> int:
+    """Exact ETH -> wei conversion (no binary floating point rounding)."""
+    if isinstance(value_eth, float) and not math.isfinite(value_eth):
+        raise ValueError("value_eth must be finite")
+    try:
+        dec = Decimal(str(value_eth))
+    except InvalidOperation as err:
+        raise ValueError(f"value_eth is not a number: {value_eth!r}") from err
+    wei = dec * WEI_PER_ETH
+    if wei != wei.to_integral_value():
+        raise ValueError("value_eth has more than 18 decimal places")
+    return int(wei)
+
+
+def _parse_calldata(calldata_hex: str) -> bytes:
+    clean = calldata_hex.strip()
+    if clean[:2] in ("0x", "0X"):
+        clean = clean[2:]
+    if len(clean) % 2 != 0:
+        raise ValueError("calldata hex has an odd number of digits")
+    return bytes.fromhex(clean)
+
+
 class SentinelBridge:
-    def __init__(self, lib_path: Optional[str] = None):
-        if lib_path is None:
-            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            ext = "dylib" if sys.platform == "darwin" else "so"
-            lib_path = os.path.join(base_dir, "csrc", f"libsentinel_core.{ext}")
+    """Owns one native memory arena. Cache operations are serialized by a lock
+    because ctypes releases the GIL while native code runs."""
 
-        assert os.path.exists(lib_path), f"Native dynamic library missing at: {lib_path}"
-        self._lib = ctypes.CDLL(lib_path)
+    def __init__(self, lib_path: str | Path | None = None):
+        path = Path(lib_path) if lib_path is not None else find_library()
+        if not path.is_file():
+            raise NativeLibraryError(f"Native dynamic library missing at: {path}")
+        try:
+            self._lib = ctypes.CDLL(str(path))
+        except OSError as err:
+            raise NativeLibraryError(f"Failed to load native library {path}: {err}") from err
+        self.lib_path = path
+        self._lock = threading.Lock()
+        self.is_initialized = False
+        self._bind_symbols()
+        self._check_abi()
 
-        # Function signatures
-        self._lib.sentinel_init_arena.argtypes = [ctypes.POINTER(SentinelMemoryArena)]
-        self._lib.sentinel_init_arena.restype = ctypes.c_int
+        self._arena = SentinelMemoryArena()
+        rc = self._lib.sentinel_init_arena(ctypes.byref(self._arena))
+        if rc != SentinelStatusCode.OK:
+            raise NativeLibraryError(f"Failed to initialize SentinelMemoryArena: {_status_name(rc)}")
+        self.is_initialized = True
 
-        self._lib.sentinel_reset_arena.argtypes = [ctypes.POINTER(SentinelMemoryArena)]
-        self._lib.sentinel_reset_arena.restype = None
+    def _bind_symbols(self) -> None:
+        lib = self._lib
+        try:
+            lib.sentinel_abi_version.argtypes = []
+            lib.sentinel_abi_version.restype = ctypes.c_uint32
+        except AttributeError as err:
+            raise NativeLibraryError(f"{self.lib_path} predates ABI versioning; rebuild it (`make csrc`)") from err
+        lib.sentinel_arena_size.argtypes = []
+        lib.sentinel_arena_size.restype = ctypes.c_size_t
+        lib.sentinel_cache_capacity.argtypes = []
+        lib.sentinel_cache_capacity.restype = ctypes.c_size_t
 
-        self._lib.sentinel_validate_tx.argtypes = [
+        lib.sentinel_init_arena.argtypes = [ctypes.POINTER(SentinelMemoryArena)]
+        lib.sentinel_init_arena.restype = ctypes.c_int
+        lib.sentinel_reset_arena.argtypes = [ctypes.POINTER(SentinelMemoryArena)]
+        lib.sentinel_reset_arena.restype = None
+
+        lib.sentinel_validate_tx.argtypes = [
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_size_t,
@@ -104,36 +183,51 @@ class SentinelBridge:
             ctypes.c_uint64,
             ctypes.POINTER(SentinelValidationResult),
         ]
-        self._lib.sentinel_validate_tx.restype = ctypes.c_int
+        lib.sentinel_validate_tx.restype = ctypes.c_int
 
-        self._lib.sentinel_cache_put.argtypes = [
+        lib.sentinel_cache_put.argtypes = [
             ctypes.POINTER(SentinelMemoryArena),
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_uint64,
         ]
-        self._lib.sentinel_cache_put.restype = ctypes.c_int
+        lib.sentinel_cache_put.restype = ctypes.c_int
 
-        self._lib.sentinel_cache_get.argtypes = [
+        lib.sentinel_cache_get.argtypes = [
             ctypes.POINTER(SentinelMemoryArena),
             ctypes.c_char_p,
+            ctypes.c_uint64,
             ctypes.c_char_p,
             ctypes.c_size_t,
         ]
-        self._lib.sentinel_cache_get.restype = ctypes.c_int
+        lib.sentinel_cache_get.restype = ctypes.c_int
 
-        self._arena = SentinelMemoryArena()
-        rc = self._lib.sentinel_init_arena(ctypes.byref(self._arena))
-        assert rc == 0, f"Failed to initialize SentinelMemoryArena: {rc}"
-        self.is_initialized = True
+    def _check_abi(self) -> None:
+        version = self._lib.sentinel_abi_version()
+        if version != EXPECTED_ABI_VERSION:
+            raise NativeLibraryError(
+                f"ABI mismatch: library {self.lib_path} is v{version}, bridge expects v{EXPECTED_ABI_VERSION}"
+            )
+        native_size = self._lib.sentinel_arena_size()
+        if native_size != ctypes.sizeof(SentinelMemoryArena):
+            raise NativeLibraryError(
+                f"Struct layout mismatch: native arena is {native_size} bytes, "
+                f"ctypes arena is {ctypes.sizeof(SentinelMemoryArena)} bytes"
+            )
+        if self._lib.sentinel_cache_capacity() != CACHE_CAPACITY:
+            raise NativeLibraryError("Cache capacity mismatch between native library and bridge")
 
-    def close(self):
-        if self.is_initialized:
-            self._lib.sentinel_reset_arena(ctypes.byref(self._arena))
-            self.is_initialized = False
+    def close(self) -> None:
+        if getattr(self, "is_initialized", False):
+            with self._lock:
+                self._lib.sentinel_reset_arena(ctypes.byref(self._arena))
+                self.is_initialized = False
 
-    def __del__(self):
-        self.close()
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:  # noqa: S110  # pragma: no cover - interpreter shutdown
+            pass
 
     def validate_tx(
         self,
@@ -142,24 +236,30 @@ class SentinelBridge:
         value_wei: int,
         gas_limit: int,
     ) -> SentinelValidationResult:
-        assert self.is_initialized, "Bridge arena is not initialized"
-        assert isinstance(to_address, str), "to_address must be a string"
-        assert isinstance(calldata, (bytes, bytearray)), "calldata must be bytes"
+        """Low-level validation. Raises ``ValueError`` for negative/non-integer inputs."""
+        if not isinstance(to_address, str):
+            raise TypeError("to_address must be a string")
+        if not isinstance(calldata, (bytes, bytearray)):
+            raise TypeError("calldata must be bytes")
+        if isinstance(value_wei, bool) or not isinstance(value_wei, int) or value_wei < 0:
+            raise ValueError("value_wei must be a non-negative integer")
+        if isinstance(gas_limit, bool) or not isinstance(gas_limit, int) or gas_limit < 0:
+            raise ValueError("gas_limit must be a non-negative integer")
+
+        # Round partial gwei UP and saturate at UINT64_MAX so that neither
+        # truncation nor ctypes' silent modulo-2**64 wrapping can turn an
+        # oversized value into an acceptable one.
+        value_gwei = min(-(-value_wei // WEI_PER_GWEI), UINT64_MAX)
+        gas = min(gas_limit, UINT64_MAX)
 
         result = SentinelValidationResult()
-        c_to = to_address.encode("utf-8")
         c_calldata = bytes(calldata)
-        c_len = len(c_calldata)
-
-        # Scale wei to Gwei (1 ETH = 10^9 Gwei) to prevent 64-bit integer overflow
-        val_gwei = value_wei // 10**9 if value_wei >= 10**9 else (1 if value_wei > 0 else 0)
-
         self._lib.sentinel_validate_tx(
-            c_to,
+            to_address.encode("utf-8"),
             c_calldata,
-            ctypes.c_size_t(c_len),
-            ctypes.c_uint64(val_gwei),
-            ctypes.c_uint64(gas_limit),
+            ctypes.c_size_t(len(c_calldata)),
+            ctypes.c_uint64(value_gwei),
+            ctypes.c_uint64(gas),
             ctypes.byref(result),
         )
         return result
@@ -170,86 +270,103 @@ class SentinelBridge:
         value_eth: float = 0.0,
         gas_limit: int = 100000,
         calldata_hex: str = "0x",
+        value_wei: int | None = None,
     ) -> ValidationSummary:
-        """High-level transaction validation with latency profiling."""
+        """High-level validation with latency profiling. Never raises for bad agent input;
+        malformed arguments produce an ``is_valid=False`` summary instead."""
         t0 = time.perf_counter_ns()
 
-        clean_hex = calldata_hex.strip()
-        if clean_hex.startswith("0x") or clean_hex.startswith("0X"):
-            clean_hex = clean_hex[2:]
-        if len(clean_hex) % 2 != 0:
-            clean_hex = "0" + clean_hex
-
-        calldata_bytes = bytes.fromhex(clean_hex) if clean_hex else b""
-        value_wei = int(value_eth * 10**18)
-
-        raw_res = self.validate_tx(
-            to_address=to_address,
-            calldata=calldata_bytes,
-            value_wei=value_wei,
-            gas_limit=gas_limit,
-        )
-        t1 = time.perf_counter_ns()
-        latency_us = round((t1 - t0) / 1000.0, 2)
+        def rejected(code: SentinelStatusCode, err: Exception) -> ValidationSummary:
+            return ValidationSummary(
+                is_valid=False,
+                status_code=int(code),
+                status_name=code.name,
+                reason=f"Invalid input: {err}",
+                function_selector="0x00000000",
+                gas_limit=gas_limit if isinstance(gas_limit, int) else 0,
+                value_wei=value_wei if isinstance(value_wei, int) else 0,
+                latency_us=round((time.perf_counter_ns() - t0) / 1000.0, 2),
+            )
 
         try:
-            status_enum = SentinelStatusCode(raw_res.status_code)
-            status_name = status_enum.name
-        except ValueError:
-            status_name = f"UNKNOWN({raw_res.status_code})"
-
-        selector_str = f"0x{raw_res.selector:08x}" if raw_res.selector != 0 else "0x00000000"
+            calldata = _parse_calldata(calldata_hex)
+        except ValueError as err:
+            return rejected(SentinelStatusCode.ERR_MALFORMED_CALLDATA, err)
+        try:
+            wei = value_wei if value_wei is not None else _eth_to_wei(value_eth)
+            raw = self.validate_tx(to_address, calldata, wei, gas_limit)
+        except (TypeError, ValueError) as err:
+            return rejected(SentinelStatusCode.ERR_INVALID_ARGUMENT, err)
+        latency_us = round((time.perf_counter_ns() - t0) / 1000.0, 2)
 
         return ValidationSummary(
-            is_valid=(raw_res.status_code == SentinelStatusCode.OK),
-            status_code=raw_res.status_code,
-            status_name=status_name,
-            reason=raw_res.reason_str,
-            function_selector=selector_str,
-            gas_limit=raw_res.gas_limit,
-            value_wei=value_wei,
+            is_valid=(raw.status_code == SentinelStatusCode.OK),
+            status_code=raw.status_code,
+            status_name=_status_name(raw.status_code),
+            reason=raw.reason_str,
+            function_selector=f"0x{raw.selector:08x}",
+            gas_limit=gas_limit,
+            value_wei=wei,
             latency_us=latency_us,
         )
 
-    def cache_put(self, key: str, value: str, timestamp_ns: Optional[int] = None) -> bool:
-        assert self.is_initialized, "Bridge arena is not initialized"
-        ts = timestamp_ns if timestamp_ns is not None else time.time_ns()
-        rc = self._lib.sentinel_cache_put(
-            ctypes.byref(self._arena),
-            key.encode("utf-8"),
-            value.encode("utf-8"),
-            ctypes.c_uint64(ts),
-        )
-        return rc == 0
+    def cache_put_status(self, key: str, value: str, ttl_seconds: float = 0.0) -> SentinelStatusCode:
+        """Store ``value`` under ``key``. ``ttl_seconds <= 0`` means no expiry."""
+        if not math.isfinite(ttl_seconds):
+            return SentinelStatusCode.ERR_INVALID_ARGUMENT
+        expires_at = 0
+        if ttl_seconds > 0:
+            expires_at = min(time.monotonic_ns() + int(ttl_seconds * 1e9), UINT64_MAX)
+        with self._lock:
+            if not self.is_initialized:
+                return SentinelStatusCode.ERR_NOT_INITIALIZED
+            rc = self._lib.sentinel_cache_put(
+                ctypes.byref(self._arena),
+                key.encode("utf-8"),
+                value.encode("utf-8"),
+                ctypes.c_uint64(expires_at),
+            )
+        return SentinelStatusCode(rc)
 
-    def cache_get(self, key: str) -> Optional[str]:
-        assert self.is_initialized, "Bridge arena is not initialized"
-        buf = ctypes.create_string_buffer(512)
-        rc = self._lib.sentinel_cache_get(
-            ctypes.byref(self._arena),
-            key.encode("utf-8"),
-            buf,
-            ctypes.c_size_t(512),
-        )
-        if rc == 0:
+    def cache_put(self, key: str, value: str, ttl_seconds: float = 0.0) -> bool:
+        return self.cache_put_status(key, value, ttl_seconds) == SentinelStatusCode.OK
+
+    def cache_get(self, key: str) -> str | None:
+        buf = ctypes.create_string_buffer(MAX_VAL_LEN)
+        with self._lock:
+            if not self.is_initialized:
+                return None
+            rc = self._lib.sentinel_cache_get(
+                ctypes.byref(self._arena),
+                key.encode("utf-8"),
+                ctypes.c_uint64(time.monotonic_ns()),
+                buf,
+                ctypes.c_size_t(MAX_VAL_LEN),
+            )
+        if rc == SentinelStatusCode.OK:
             return buf.value.decode("utf-8", errors="replace")
         return None
 
     def cache_stats(self) -> Dict[str, Any]:
-        return {
-            "capacity": 1024,
-            "count": self._arena.count,
-            "next_idx": self._arena.next_idx,
-            "is_initialized": bool(self._arena.is_initialized),
-        }
+        with self._lock:
+            return {
+                "capacity": CACHE_CAPACITY,
+                "count": self._arena.count,
+                "next_idx": self._arena.next_idx,
+                "is_initialized": bool(self._arena.is_initialized),
+                "max_key_bytes": MAX_KEY_LEN - 1,
+                "max_value_bytes": MAX_VAL_LEN - 1,
+            }
 
 
-# Singleton accessor
-_GLOBAL_BRIDGE: Optional[SentinelBridge] = None
+_GLOBAL_BRIDGE: SentinelBridge | None = None
+_GLOBAL_LOCK = threading.Lock()
 
 
 def get_bridge() -> SentinelBridge:
+    """Process-wide bridge singleton (lazily loaded)."""
     global _GLOBAL_BRIDGE
-    if _GLOBAL_BRIDGE is None:
-        _GLOBAL_BRIDGE = SentinelBridge()
-    return _GLOBAL_BRIDGE
+    with _GLOBAL_LOCK:
+        if _GLOBAL_BRIDGE is None:
+            _GLOBAL_BRIDGE = SentinelBridge()
+        return _GLOBAL_BRIDGE

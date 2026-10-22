@@ -18,3 +18,11 @@ venv/
 *.egg-info/
 build/
 dist/
+*.dll
+*.bak
+
+# Tooling
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/

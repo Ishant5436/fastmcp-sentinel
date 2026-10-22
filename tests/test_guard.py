@@ -1,11 +1,9 @@
-import pytest
-import time
 from fastmcp_sentinel.guard import (
-    StatefulAgentGuard,
     GuardConfig,
-    GuardCheckResult,
     GuardStatusCode,
+    StatefulAgentGuard,
 )
+
 
 def test_single_tx_limit_enforcement():
     # 1 ETH limit for single tx, 5 ETH for session
@@ -27,6 +25,7 @@ def test_single_tx_limit_enforcement():
     assert res2.allowed is False
     assert res2.status_code == GuardStatusCode.EXCEEDS_SINGLE_LIMIT
     assert "exceeds single transaction limit" in res2.reason
+
 
 def test_cumulative_session_spend_enforcement():
     config = GuardConfig(
@@ -54,6 +53,7 @@ def test_cumulative_session_spend_enforcement():
     assert "exceeds session spend budget" in res3.reason
     assert res3.remaining_session_budget_wei == 4 * 10**17
 
+
 def test_token_bucket_rate_limiting():
     config = GuardConfig(
         max_single_tx_wei=10**18,
@@ -75,9 +75,10 @@ def test_token_bucket_rate_limiting():
     assert res3.status_code == GuardStatusCode.RATE_LIMITED
     assert "Rate limit exceeded" in res3.reason
 
+
 def test_address_filtering():
-    blacklisted = "0xBadBadBadBadBadBadBadBadBadBadBadBadBadB"
-    whitelisted = "0xGoodGoodGoodGoodGoodGoodGoodGoodGoodGood"
+    blacklisted = "0xBADbad000000000000000000000000000000bAD0"
+    whitelisted = "0x600d00000000000000000000000000000000600D"
 
     config = GuardConfig(
         max_single_tx_wei=10**18,

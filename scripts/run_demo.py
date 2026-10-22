@@ -2,6 +2,7 @@
 """Standalone 1-Second Live Demonstration Script for FastMCP-Sentinel."""
 
 import sys
+
 from fastmcp_sentinel.cli import run_demo
 
 

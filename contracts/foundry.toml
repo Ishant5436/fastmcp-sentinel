@@ -1,0 +1,23 @@
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.30"
+optimizer = true
+optimizer_runs = 10_000
+# Conservative target for broad EVM-chain compatibility (no transient storage / MCOPY needed).
+evm_version = "shanghai"
+fuzz = { runs = 512 }
+invariant = { runs = 128, depth = 64 }
+
+[profile.ci]
+fuzz = { runs = 4096 }
+
+[rpc_endpoints]
+arc_mainnet = "${ARC_RPC_URL}"
+arc_testnet = "https://rpc.testnet.arc.network"
+
+[fmt]
+line_length = 120

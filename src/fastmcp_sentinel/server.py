@@ -3,132 +3,242 @@
 Deterministic Agentic Safety & RPC Gateway exposing 5 native FastMCP tools:
 1. sentinel_validate_calldata: Zero-copy C++ calldata validation & heuristic checks.
 2. sentinel_simulate_transaction: Zero-mutation EVM state simulation & revert decoding.
-3. sentinel_rpc_cache: High-throughput C++ LRU ring-buffer cache for RPC payloads.
+3. sentinel_rpc_cache: Fixed-capacity C++ ring-buffer cache (with TTL) for RPC payloads.
 4. sentinel_agent_guard: Stateful session spend caps and rate limiting.
-5. sentinel_audit_invariants: Static AST verification of Holzmann's Power of 10 invariants.
+5. sentinel_audit_invariants: Static verification of Holzmann's Power of 10 invariants.
+
+Security posture is controlled by :class:`~fastmcp_sentinel.config.SentinelSettings`
+(environment variables). Defaults are fail-closed.
 """
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-from typing import Dict, Any
+import logging
+import threading
+from typing import Any, Dict, Literal
+from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
-from fastmcp_sentinel.bridge import get_bridge
-from fastmcp_sentinel.simulation import EvmSimulator
-from fastmcp_sentinel.guard import StatefulAgentGuard, GuardConfig
 from fastmcp_sentinel.audit import SafetyInvariantAuditor
+from fastmcp_sentinel.bridge import SentinelBridge, SentinelStatusCode, get_bridge
 from fastmcp_sentinel.config import (
     ARC_CHAIN_ID,
-    ARC_RPC_URL,
     ARC_GAS_TOKEN,
-    base_units_to_usdc,
+    ARC_NATIVE_DECIMALS,
+    SentinelSettings,
+    native_to_usdc,
+)
+from fastmcp_sentinel.guard import GuardConfig, StatefulAgentGuard
+from fastmcp_sentinel.paths import find_csrc_dir
+from fastmcp_sentinel.simulation import EvmSimulator, RpcError, extract_revert_data
+from fastmcp_sentinel.vault import (
+    VaultStatus,
+    decode_check,
+    decode_policy,
+    encode_check,
+    encode_pay,
+    encode_policy,
+    format_usdc,
+    parse_usdc,
+    require_address,
 )
 
-# Initialize FastMCP Server
-mcp = FastMCP("fastmcp-sentinel")
+logger = logging.getLogger(__name__)
 
-# Shared Engine Singletons
-_bridge = get_bridge()
-_simulator = EvmSimulator()
-_guard = StatefulAgentGuard(
-    GuardConfig(
-        max_single_tx_wei=10**18,  # 1 ETH
-        max_session_spend_wei=5 * 10**18,  # 5 ETH
-        rate_limit_per_minute=60,
-        burst_limit=10,
-    )
-)
+INSTRUCTIONS = """\
+FastMCP-Sentinel is a safety gateway for on-chain actions.
+Before signing or broadcasting any transaction:
+1. Call `sentinel_validate_calldata` and require `is_valid`.
+2. Call `sentinel_simulate_transaction` and require `success`.
+3. Call `sentinel_agent_guard` with action `authorize` and require `allowed`
+   (this atomically reserves the spend against the session budget).
+For USDC payments on Arc, prefer `sentinel_arc_vault` with action `prepare_payment`:
+the SentinelVault contract enforces the spend policy on-chain, and the tool returns a
+pre-checked, pre-simulated unsigned transaction for the agent wallet to sign.
+Use `sentinel_rpc_cache` with a TTL for volatile reads (gasPrice, blockNumber).
+"""
 
-_CSRC_DIR = Path(__file__).resolve().parent.parent.parent / "csrc"
+mcp = FastMCP("fastmcp-sentinel", instructions=INSTRUCTIONS)
 
 
-@mcp.tool()
+class _ServerState:
+    """Lazily-initialized engine singletons, rebuilt by :func:`configure`."""
+
+    def __init__(self, settings: SentinelSettings) -> None:
+        self.settings = settings
+        self.guard = StatefulAgentGuard(
+            GuardConfig(
+                max_single_tx_wei=settings.max_single_tx_wei,
+                max_session_spend_wei=settings.max_session_spend_wei,
+                rate_limit_per_minute=settings.rate_limit_per_minute,
+                burst_limit=settings.burst_limit,
+                blacklist=set(settings.blocked_addresses),
+                whitelist=set(settings.allowed_addresses),
+            )
+        )
+        self._simulators: Dict[str, EvmSimulator] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def bridge(self) -> SentinelBridge:
+        return get_bridge()
+
+    def simulator(self, rpc_url: str) -> EvmSimulator:
+        with self._lock:
+            sim = self._simulators.get(rpc_url)
+            if sim is None:
+                sim = EvmSimulator(rpc_url=rpc_url, timeout=self.settings.rpc_timeout_seconds)
+                self._simulators[rpc_url] = sim
+            return sim
+
+
+_state: _ServerState | None = None
+_state_lock = threading.Lock()
+
+
+def configure(settings: SentinelSettings | None = None) -> SentinelSettings:
+    """(Re)initialize server state. Resets guard session state."""
+    global _state
+    resolved = settings if settings is not None else SentinelSettings.from_env()
+    with _state_lock:
+        _state = _ServerState(resolved)
+    return resolved
+
+
+def _get_state() -> _ServerState:
+    global _state
+    with _state_lock:
+        if _state is None:
+            _state = _ServerState(SentinelSettings.from_env())
+        return _state
+
+
+def _resolve_rpc(settings: SentinelSettings, rpc_url: str, chain_id: int) -> tuple[str, int | None]:
+    """Apply the RPC egress policy. Raises ``ValueError`` when the target is not permitted."""
+    by_url = {url: cid for cid, url in settings.rpc_endpoints.items()}
+    url = rpc_url.strip()
+    if chain_id and url:
+        raise ValueError("Pass either rpc_url or chain_id, not both")
+    if chain_id:
+        if chain_id not in settings.rpc_endpoints:
+            raise ValueError(f"Unsupported chain_id {chain_id}; supported: {sorted(settings.rpc_endpoints)}")
+        return settings.rpc_endpoints[chain_id], chain_id
+    if not url:
+        url = settings.default_rpc_url
+        return url, by_url.get(url, ARC_CHAIN_ID)
+    if url.startswith("mock://"):
+        if not settings.allow_mock_rpc:
+            raise ValueError("Mock simulation is disabled (set SENTINEL_ALLOW_MOCK_RPC=1 to enable)")
+        return url, None
+    if url in by_url:
+        return url, by_url[url]
+    if not settings.allow_custom_rpc:
+        raise ValueError("rpc_url is not a configured endpoint; use chain_id or set SENTINEL_ALLOW_CUSTOM_RPC=1")
+    if urlparse(url).scheme not in ("http", "https"):
+        raise ValueError("rpc_url must use http or https")
+    return url, None
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
 def sentinel_validate_calldata(
     to_address: str,
     value_eth: float = 0.0,
     gas_limit: int = 100000,
     calldata_hex: str = "0x",
+    value_wei: int | None = None,
 ) -> Dict[str, Any]:
-    """Validate EVM transaction parameters and calldata via Apple Silicon C++ core.
+    """Validate EVM transaction parameters and calldata via the native C++ core.
 
-    Enforces 32KB bounded buffer limits, value ceiling (< 100 ETH), gas ceiling (< 15M gas),
-    and decodes the 4-byte function selector with sub-millisecond zero-copy latency.
+    Enforces a 0x-prefixed 20-byte target address, 32KB bounded calldata, a well-formed
+    4-byte selector, value ceiling (<= 100 ETH), and gas ceiling (<= 15M gas).
+    Pass `value_wei` for exact integer amounts; it takes precedence over `value_eth`.
     """
-    res = _bridge.validate_transaction(
+    res = _get_state().bridge.validate_transaction(
         to_address=to_address,
         value_eth=value_eth,
         gas_limit=gas_limit,
         calldata_hex=calldata_hex,
+        value_wei=value_wei,
     )
     return res.to_dict()
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True))
 def sentinel_simulate_transaction(
     to_address: str,
     from_address: str = "0x0000000000000000000000000000000000000000",
     value_wei: int = 0,
     data: str = "0x",
-    gas: int = 21000,
+    gas: int = 0,
     rpc_url: str = "",
+    chain_id: int = 0,
 ) -> Dict[str, Any]:
-    """Simulate transaction execution against an EVM JSON-RPC state fork without mutation.
+    """Simulate transaction execution against an EVM JSON-RPC node without mutating state.
 
-    Returns execution success, decoded revert reason, exact gas consumed, and return data
-    before allowing an agent to sign or broadcast.
+    Uses `eth_call` for success/revert and `eth_estimateGas` for gas usage. Select the
+    network with `chain_id` (preferred) or a configured `rpc_url`; defaults to Arc Mainnet.
+    `gas=0` lets the node choose the gas limit.
     """
-    target_rpc = rpc_url.strip() if rpc_url.strip() else ARC_RPC_URL
-    sim = _simulator.simulate(
-        to_address=to_address,
-        from_address=from_address,
-        value_wei=value_wei,
+    state = _get_state()
+    target_rpc, resolved_chain = _resolve_rpc(state.settings, rpc_url, chain_id)
+    sim = state.simulator(target_rpc).simulate_call(
+        to=to_address,
         data=data,
-        gas=gas,
-        rpc_url=target_rpc,
+        from_addr=from_address,
+        value_wei=value_wei,
+        gas=gas or None,
     )
     res = sim.to_dict()
     res["target_rpc"] = target_rpc
-    res["chain_id"] = ARC_CHAIN_ID if target_rpc == ARC_RPC_URL else None
+    res["chain_id"] = resolved_chain
     return res
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False))
 def sentinel_rpc_cache(
-    action: str,
+    action: Literal["get", "put", "stats"],
     key: str = "",
     value: str = "",
+    ttl_seconds: float = -1.0,
 ) -> Dict[str, Any]:
-    """Manage high-performance C++ ring-buffer LRU cache for static RPC reads.
+    """Fixed-capacity C++ ring-buffer cache for RPC reads (FIFO eviction, 1024 slots).
 
     Actions:
-    - 'get': Retrieve cached JSON payload by key.
-    - 'put': Store payload in fixed 1024-slot circular arena.
-    - 'stats': Return capacity, count, and memory arena initialization status.
+    - 'get': Retrieve a cached payload by key (expired entries are misses).
+    - 'put': Store a payload (key <= 127 bytes, value <= 511 bytes). `ttl_seconds` sets
+      expiry; 0 = never, negative = server default (SENTINEL_CACHE_DEFAULT_TTL_SECONDS).
+    - 'stats': Return capacity, count, and arena status.
     """
-    act = action.strip().lower()
-    if act == "get":
-        val = _bridge.cache_get(key)
+    state = _get_state()
+    bridge = state.bridge
+    if action == "get":
+        val = bridge.cache_get(key)
         found = val is not None
-        code = 0 if found else -7
-        return {"action": "get", "key": key, "value": val or "", "status_code": code, "found": found}
-    elif act == "put":
-        ok = _bridge.cache_put(key, value)
-        code = 0 if ok else -6
-        return {"action": "put", "key": key, "status_code": code, "stored": ok}
-    elif act == "stats":
-        stats = _bridge.cache_stats()
+        code = SentinelStatusCode.OK if found else SentinelStatusCode.ERR_CACHE_NOT_FOUND
+        return {"action": "get", "key": key, "value": val or "", "status_code": int(code), "found": found}
+    if action == "put":
+        ttl = state.settings.cache_default_ttl_seconds if ttl_seconds < 0 else ttl_seconds
+        code = bridge.cache_put_status(key, value, ttl_seconds=ttl)
+        return {
+            "action": "put",
+            "key": key,
+            "status_code": int(code),
+            "status_name": code.name,
+            "stored": code == SentinelStatusCode.OK,
+            "ttl_seconds": ttl,
+        }
+    if action == "stats":
+        stats = bridge.cache_stats()
         stats["action"] = "stats"
         return stats
-    else:
-        return {"error": f"Unknown cache action '{action}'. Valid actions: 'get', 'put', 'stats'"}
+    raise ValueError(f"Unknown cache action {action!r}")
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False))
 def sentinel_agent_guard(
-    action: str,
+    action: Literal["check", "authorize", "record", "status", "arc_status", "reset"],
     to_address: str = "",
     value_wei: int = 0,
     tx_hash: str = "",
@@ -136,49 +246,165 @@ def sentinel_agent_guard(
     """Enforce session-wide financial spend limits, address filtering, and rate limits.
 
     Actions:
-    - 'check': Validate if a planned transaction is within session budget and rate limits.
-    - 'record': Record an executed transaction to update cumulative spend.
-    - 'status': Query current session spend, remaining budget, and rate limit tokens.
-    - 'reset': Reset the active session spend accumulator.
+    - 'authorize': Atomically check a planned transaction AND reserve its value against
+      the session budget. Use this before signing.
+    - 'check': Dry-run the guard decision without reserving budget.
+    - 'record': Record an executed transaction (increases cumulative spend only).
+    - 'status' / 'arc_status': Query session spend, remaining budget, and rate tokens.
+    - 'reset': Reset the session (disabled unless SENTINEL_ALLOW_AGENT_RESET=1).
     """
-    act = action.strip().lower()
-    if act == "check":
-        res = _guard.check_transaction(target_address=to_address, value_wei=value_wei)
-        return res.to_dict()
-    elif act == "record":
-        _guard.record_transaction(tx_hash=tx_hash, value_wei=value_wei)
+    state = _get_state()
+    guard = state.guard
+    if action == "check":
+        return guard.check_transaction(target_address=to_address, value_wei=value_wei).to_dict()
+    if action == "authorize":
+        return guard.authorize(target_address=to_address, value_wei=value_wei, tx_ref=tx_hash).to_dict()
+    if action == "record":
+        guard.record_transaction(tx_hash=tx_hash, value_wei=value_wei)
         return {"status": "recorded", "tx_hash": tx_hash, "value_wei": value_wei}
-    elif act == "status":
-        return _guard.get_status()
-    elif act == "arc_status":
-        status = _guard.get_status()
+    if action == "status":
+        return guard.get_status()
+    if action == "arc_status":
+        status = guard.get_status()
         status["network"] = "Arc Mainnet"
         status["chain_id"] = ARC_CHAIN_ID
         status["gas_asset"] = ARC_GAS_TOKEN
-        status["session_spend_usdc"] = base_units_to_usdc(status.get("session_spend_wei", 0))
-        status["remaining_session_budget_usdc"] = base_units_to_usdc(status.get("remaining_session_budget_wei", 0))
+        # Guard values are native-balance units; on Arc the native token is USDC with 18 decimals.
+        status["native_decimals"] = ARC_NATIVE_DECIMALS
+        status["session_spend_usdc"] = native_to_usdc(status.get("session_spend_wei", 0))
+        status["remaining_session_budget_usdc"] = native_to_usdc(status.get("remaining_session_budget_wei", 0))
         return status
-    elif act == "reset":
-        _guard.reset_session()
+    if action == "reset":
+        if not state.settings.allow_agent_reset:
+            logger.warning("guard.reset denied: agent-initiated reset is disabled")
+            raise PermissionError(
+                "Session reset is disabled for agents (operator can set SENTINEL_ALLOW_AGENT_RESET=1)"
+            )
+        guard.reset_session()
         return {"status": "reset"}
-    else:
-        return {"error": f"Unknown guard action '{action}'. Valid actions: 'check', 'record', 'status', 'arc_status', 'reset'"}
+    raise ValueError(f"Unknown guard action {action!r}")
 
 
-@mcp.tool()
+def _vault_context(vault_address: str, chain_id: int) -> tuple[EvmSimulator, str, int]:
+    state = _get_state()
+    settings = state.settings
+    vault = (vault_address or settings.vault_address).strip()
+    if not vault:
+        raise ValueError("vault_address is required (or set SENTINEL_VAULT_ADDRESS)")
+    require_address(vault, "vault_address")
+    cid = chain_id or settings.default_chain_id
+    url, _ = _resolve_rpc(settings, "", cid)
+    return state.simulator(url), vault, cid
+
+
+def _vault_call(sim: EvmSimulator, vault: str, data: str, sender: str | None = None) -> str:
+    tx: Dict[str, Any] = {"to": vault, "data": data}
+    if sender:
+        tx["from"] = sender
+    return sim.eth_call(tx)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=False, openWorldHint=True))
+def sentinel_arc_vault(
+    action: Literal["policy", "check", "prepare_payment"],
+    vault_address: str = "",
+    to_address: str = "",
+    amount_usdc: str = "",
+    memo: str = "",
+    chain_id: int = 0,
+) -> Dict[str, Any]:
+    """Interact with an on-chain SentinelVault (USDC spend policy enforced by contract on Arc).
+
+    Actions:
+    - 'policy': Read owner, agent, limits, period spend, pause state, and USDC balance.
+    - 'check': Ask the contract whether paying `amount_usdc` to `to_address` would succeed now.
+    - 'prepare_payment': Run the on-chain policy check, the native calldata gate, an `eth_call`
+      simulation from the agent address, and gas estimation; return an unsigned transaction
+      for the agent wallet to sign. Nothing is signed or broadcast by this server.
+
+    `amount_usdc` is a decimal string (e.g. "2.50"). `memo` is <= 32 bytes of text or a
+    0x-prefixed 32-byte hex value. `chain_id` defaults to Arc Mainnet (5042).
+    """
+    sim, vault, cid = _vault_context(vault_address, chain_id)
+    base: Dict[str, Any] = {"action": action, "vault_address": vault, "chain_id": cid}
+
+    if action == "policy":
+        policy = decode_policy(_vault_call(sim, vault, encode_policy()))
+        return {**base, **policy.to_dict()}
+
+    to = require_address(to_address, "to_address")
+    amount = parse_usdc(amount_usdc)
+    status, remaining = decode_check(_vault_call(sim, vault, encode_check(to, amount)))
+    base.update(
+        {
+            "to_address": to,
+            "amount": amount,
+            "amount_usdc": format_usdc(amount),
+            "vault_status": status.name,
+            "allowed": status == VaultStatus.OK,
+            "remaining_in_period": remaining,
+            "remaining_in_period_usdc": format_usdc(remaining),
+        }
+    )
+    if action == "check" or status != VaultStatus.OK:
+        if action == "prepare_payment":
+            base["ready"] = False
+            base["reason"] = f"Vault policy rejects this payment: {status.name}"
+        return base
+
+    if action != "prepare_payment":
+        raise ValueError(f"Unknown vault action {action!r}")
+
+    data = encode_pay(to, amount, memo)
+    policy = decode_policy(_vault_call(sim, vault, encode_policy()))
+    gate = _get_state().bridge.validate_transaction(to_address=vault, value_wei=0, gas_limit=0, calldata_hex=data)
+    if not gate.is_valid:
+        return {**base, "ready": False, "reason": f"Calldata gate rejected: {gate.reason}"}
+
+    tx: Dict[str, Any] = {"from": policy.agent, "to": vault, "data": data, "value": "0x0"}
+    try:
+        sim.eth_call(tx)
+    except RpcError as err:
+        raw = extract_revert_data(err.data)
+        reason = sim.decode_revert_reason(raw) if raw else str(err)
+        return {**base, "ready": False, "reason": f"Simulation reverted: {reason}"}
+    try:
+        gas_estimate = sim.estimate_gas(tx)
+    except (RpcError, ValueError, TypeError) as err:
+        return {**base, "ready": False, "reason": f"Gas estimation failed: {err}"}
+
+    gas_limit = gas_estimate * 12 // 10  # 20% headroom
+    return {
+        **base,
+        "ready": True,
+        "reason": "Policy check, calldata gate, and simulation passed",
+        "agent_address": policy.agent,
+        "gas_estimate": gas_estimate,
+        "unsigned_tx": {
+            "chainId": cid,
+            "from": policy.agent,
+            "to": vault,
+            "data": data,
+            "value": "0x0",
+            "gas": hex(gas_limit),
+        },
+    }
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
 def sentinel_audit_invariants() -> Dict[str, Any]:
-    """Execute static AST analysis verifying Power of 10 Safety Invariants on C++ core.
+    """Execute static analysis verifying Power of 10 Safety Invariants on the C++ core.
 
     Audits maximum function lengths (<= 60 lines), assertion densities (>= 2 asserts/func),
-    absence of dynamic heap allocation (malloc/new/free), and bounded control flows.
+    absence of dynamic heap allocation (malloc/new/free), recursion, and unbounded loops.
     """
-    auditor = SafetyInvariantAuditor(_CSRC_DIR)
-    report = auditor.audit()
-    return report.to_dict()
+    auditor = SafetyInvariantAuditor(find_csrc_dir())
+    return auditor.audit().to_dict()
 
 
 def main() -> None:
     """Run FastMCP server over stdio."""
+    configure()
     mcp.run(transport="stdio")
 
 

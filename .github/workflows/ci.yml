@@ -1,44 +1,135 @@
-name: FastMCP-Sentinel CI
+name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-and-test:
+  lint:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install "ruff>=0.6" "mypy>=1.10" types-requests "mcp>=1.29.1,<2" "pydantic>=2" "requests>=2.31"
+      - run: ruff check src tests scripts
+      - run: ruff format --check src tests scripts
+      - run: mypy
+
+  test:
+    name: Test (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ macos-14, ubuntu-latest ]
-        python-version: [ "3.12" ]
-
+        os: [ubuntu-latest, macos-14]
+        python-version: ["3.12", "3.13"]
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: "pip"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - name: Install package (dev extras)
+        run: pip install -e ".[dev]"
+      - name: Build native core in source tree
+        run: make csrc
+      - name: Run test suite
+        run: pytest --cov --cov-report=term-missing --cov-report=xml
+      - name: Power of 10 audit
+        run: fastmcp-sentinel audit --csrc-dir csrc
+      - name: End-to-end demo
+        run: fastmcp-sentinel demo
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        with:
+          name: coverage-xml
+          path: coverage.xml
 
-      - name: Install Python Dependencies
+  contracts:
+    name: Contracts + on-chain integration (Foundry, anvil, browser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+      - name: forge fmt
+        working-directory: contracts
+        run: forge fmt --check
+      - name: forge build
+        working-directory: contracts
+        run: forge build --sizes
+      - name: forge test (unit + fuzz)
+        working-directory: contracts
+        env:
+          FOUNDRY_PROFILE: ci
+        run: forge test -vvv
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and browser
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
-          pip install pytest requests pydantic mcp
+          pip install -e ".[dev,e2e]"
+          python -m playwright install --with-deps chromium
+          make csrc
+      - name: Python vault client + web app against anvil
+        run: pytest tests/test_vault.py tests/test_app.py -v -rs
 
-      - name: Compile C++ Invariant Core
-        run: make csrc
+  native-sanitizers:
+    name: Native tests (ASan + UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build/asan -DCMAKE_BUILD_TYPE=Debug -DSENTINEL_SANITIZE=ON -DCMAKE_CXX_COMPILER=g++
+      - name: Build
+        run: cmake --build build/asan --parallel
+      - name: Run native tests
+        run: ctest --test-dir build/asan --output-on-failure
 
-      - name: Execute Full Test Suite
-        run: pytest tests/ -v
-
-      - name: Verify Power of 10 Safety Invariants (AST Audit)
-        run: python scripts/audit_safety_invariants.py
-
-      - name: Run 1-Second Live End-to-End Demo
-        run: python scripts/run_demo.py
+  package:
+    name: Build & smoke-test distribution (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build
+      - name: Build sdist and wheel
+        run: python -m build --outdir dist
+      - name: Install wheel into a clean venv and test it from outside the repo
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install dist/*.whl pytest anyio
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/venv/bin/fastmcp-sentinel" --version
+          "$RUNNER_TEMP/venv/bin/fastmcp-sentinel" check
+          "$RUNNER_TEMP/venv/bin/python" -m pytest "$GITHUB_WORKSPACE/tests" -q -o pythonpath= -p no:cacheprovider
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: dist/

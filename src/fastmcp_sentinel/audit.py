@@ -1,7 +1,7 @@
 """Static AST & Source Safety Invariant Auditor.
 
 Mechanically enforces Gerard J. Holzmann's Power of 10 Safety Invariants on C++ source files:
-- Rule 1: Simple Control Flow (No goto, setjmp, longjmp)
+- Rule 1: Simple Control Flow (No goto, setjmp, longjmp, or direct recursion)
 - Rule 2: Bounded Loops (No unbounded while loops)
 - Rule 3: No Dynamic Memory After Initialization (Zero malloc/new/free/delete)
 - Rule 4: Function Length <= 60 lines
@@ -12,11 +12,45 @@ Mechanically enforces Gerard J. Holzmann's Power of 10 Safety Invariants on C++ 
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Any, ClassVar, Dict, List
+
+
+def strip_comments_and_strings(source: str) -> str:
+    """Blank out comments and string/char literals, preserving newlines and offsets.
+
+    Prevents prose such as "allocate a new entry" or ``/** docs */`` from
+    triggering heap / pointer rules, and keeps braces inside strings from
+    confusing function extraction.
+    """
+    out: List[str] = []
+    i, n = 0, len(source)
+    while i < n:
+        c = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/":
+            j = source.find("\n", i)
+            j = n if j == -1 else j
+            out.append(" " * (j - i))
+            i = j
+        elif c == "/" and nxt == "*":
+            j = source.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            out.append("".join(ch if ch == "\n" else " " for ch in source[i:j]))
+            i = j
+        elif c in ('"', "'"):
+            j = i + 1
+            while j < n and source[j] != c and source[j] != "\n":
+                j += 2 if source[j] == "\\" else 1
+            j = min(j + 1, n)
+            out.append(c + " " * max(0, j - i - 2) + (c if j - i >= 2 else ""))
+            i = j
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
 
 
 @dataclass
@@ -29,6 +63,7 @@ class FunctionMetric:
     assert_count: int
     passed_length: bool
     passed_asserts: bool
+    is_recursive: bool = False
 
 
 @dataclass
@@ -61,15 +96,24 @@ class AuditReport:
 class SafetyInvariantAuditor:
     """Institutional static auditor for deterministic C++ systems."""
 
-    FORBIDDEN_CONTROL_FLOW = [r"\bgoto\b", r"\bsetjmp\b", r"\blongjmp\b"]
-    FORBIDDEN_HEAP = [r"\bmalloc\b", r"\bcalloc\b", r"\brealloc\b", r"\bfree\b", r"\bnew\s+", r"\bdelete\s+"]
-    FORBIDDEN_POINTERS = [r"\*\*", r"\(\s*\*\s*[a-zA-Z0-9_]+\s*\)\s*\("]  # double pointers, function pointers
+    FORBIDDEN_CONTROL_FLOW: ClassVar[List[str]] = [r"\bgoto\b", r"\bsetjmp\b", r"\blongjmp\b"]
+    FORBIDDEN_HEAP: ClassVar[List[str]] = [
+        r"\bmalloc\b",
+        r"\bcalloc\b",
+        r"\brealloc\b",
+        r"\bfree\b",
+        r"\bnew\s+",
+        r"\bdelete\s+",
+    ]
+    FORBIDDEN_POINTERS: ClassVar[List[str]] = [
+        r"\*\*",
+        r"\(\s*\*\s*[a-zA-Z0-9_]+\s*\)\s*\(",
+    ]  # double pointers, function pointers
 
     def __init__(self, csrc_dir: str | Path) -> None:
         self.csrc_dir = Path(csrc_dir)
 
     def _extract_functions(self, content: str, filename: str) -> List[FunctionMetric]:
-        lines = content.splitlines()
         metrics: List[FunctionMetric] = []
 
         # Regex to locate C++ function signatures followed by opening brace
@@ -109,6 +153,10 @@ class SafetyInvariantAuditor:
             assert_matches = re.findall(r"\bassert\s*\(", func_body)
             assert_count = len(assert_matches)
 
+            # Direct recursion: the body calls the function's own name
+            body_inner = func_body[1:]
+            is_recursive = re.search(rf"\b{re.escape(func_name)}\s*\(", body_inner) is not None
+
             metrics.append(
                 FunctionMetric(
                     name=func_name,
@@ -119,6 +167,7 @@ class SafetyInvariantAuditor:
                     assert_count=assert_count,
                     passed_length=(func_lines <= 60),
                     passed_asserts=(assert_count >= 2),
+                    is_recursive=is_recursive,
                 )
             )
 
@@ -137,7 +186,7 @@ class SafetyInvariantAuditor:
             "Rule 9 (Restricted Pointers)": True,
         }
 
-        cpp_files = list(self.csrc_dir.glob("*.cpp")) + list(self.csrc_dir.glob("*.hpp"))
+        cpp_files = [p for ext in ("*.cpp", "*.cc", "*.hpp", "*.h") for p in self.csrc_dir.glob(ext)]
 
         if not cpp_files:
             violations.append(f"No C++ files discovered in {self.csrc_dir}")
@@ -145,8 +194,8 @@ class SafetyInvariantAuditor:
 
         for file_path in sorted(cpp_files):
             filename = file_path.name
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
+            with open(file_path, encoding="utf-8") as f:
+                content = strip_comments_and_strings(f.read())
 
             # Rule 1: Control Flow
             for pat in self.FORBIDDEN_CONTROL_FLOW:
@@ -182,14 +231,21 @@ class SafetyInvariantAuditor:
                 funcs = self._extract_functions(content, filename)
                 function_metrics.extend(funcs)
                 for func in funcs:
+                    if func.is_recursive:
+                        violations.append(
+                            f"[{filename}] Rule 1 Violation: Function '{func.name}' is directly recursive."
+                        )
+                        rules["Rule 1 (Simple Control Flow)"] = False
                     if not func.passed_length:
                         violations.append(
-                            f"[{filename}] Rule 4 Violation: Function '{func.name}' length {func.line_count} exceeds 60 lines limit."
+                            f"[{filename}] Rule 4 Violation: Function '{func.name}' length {func.line_count} "
+                            "exceeds 60 lines limit."
                         )
                         rules["Rule 4 (Function Length <= 60)"] = False
                     if not func.passed_asserts:
                         violations.append(
-                            f"[{filename}] Rule 5 Violation: Function '{func.name}' has {func.assert_count} assertions (minimum 2 required)."
+                            f"[{filename}] Rule 5 Violation: Function '{func.name}' has {func.assert_count} "
+                            "assertions (minimum 2 required)."
                         )
                         rules["Rule 5 (Assertion Density >= 2)"] = False
 

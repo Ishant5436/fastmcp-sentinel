@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sentinel Vault</title>
+<meta name="description" content="On-chain USDC spend policy for AI agents on Arc — FastMCP-Sentinel">
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #14171c; --muted: #5d6672; --line: #e2e5ea;
+  --accent: #2a6df4; --accent-text: #ffffff; --ok: #137a4b; --warn: #a15c00; --bad: #b42318;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1116; --panel: #161b22; --text: #e6e9ee; --muted: #9aa4b1; --line: #2a313b;
+    --accent: #5b8ff9; --accent-text: #0e1116; --ok: #3fb97f; --warn: #e0a243; --bad: #f07167;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1116; --panel: #161b22; --text: #e6e9ee; --muted: #9aa4b1; --line: #2a313b;
+  --accent: #5b8ff9; --accent-text: #0e1116; --ok: #3fb97f; --warn: #e0a243; --bad: #f07167;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 15px; margin: 0 0 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.sub { color: var(--muted); margin: 2px 0 0; font-size: 14px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+input, select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+input.addr { flex: 1 1 320px; font-family: var(--mono); font-size: 13px; }
+button { font: inherit; font-weight: 600; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+button.ghost { background: transparent; color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.stat { border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.stat .k { color: var(--muted); font-size: 13px; }
+.stat .v { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.meter { height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; margin-top: 8px; }
+.meter > div { height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font-size: 14px; }
+dt { color: var(--muted); }
+dd { margin: 0; font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 12px; font-weight: 650; border: 1px solid currentColor; }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; }
+td.mono { font-family: var(--mono); overflow-wrap: anywhere; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.table-wrap { overflow-x: auto; }
+#log { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: pre-wrap; margin: 8px 0 0; min-height: 1.5em; }
+.actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.actions h3 { font-size: 14px; margin: 0 0 8px; }
+.actions .row input { flex: 1 1 120px; }
+footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
+a { color: var(--accent); }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Sentinel Vault</h1>
+      <p class="sub">On-chain USDC spend policy for autonomous AI agents · FastMCP-Sentinel on Arc</p>
+    </div>
+    <div class="row">
+      <select id="network" aria-label="Network"></select>
+      <button id="connect" class="ghost">Connect wallet</button>
+    </div>
+  </header>
+
+  <section class="panel">
+    <form id="load" class="row">
+      <input id="vault" class="addr" placeholder="Vault address 0x…" aria-label="Vault address" autocomplete="off" spellcheck="false">
+      <button type="submit">Load vault</button>
+    </form>
+    <p id="log" role="status"></p>
+  </section>
+
+  <div id="dashboard" hidden>
+    <section class="panel">
+      <h2>Policy</h2>
+      <div class="grid">
+        <div class="stat"><div class="k">Vault balance</div><div class="v" id="s-balance">–</div></div>
+        <div class="stat"><div class="k">Per-transaction cap</div><div class="v" id="s-maxtx">–</div></div>
+        <div class="stat">
+          <div class="k">Spent this period</div><div class="v" id="s-spent">–</div>
+          <div class="meter" aria-hidden="true"><div id="s-meter"></div></div>
+        </div>
+        <div class="stat"><div class="k">Remaining this period</div><div class="v" id="s-remaining">–</div></div>
+      </div>
+      <dl style="margin-top:16px">
+        <dt>Status</dt><dd id="d-status"></dd>
+        <dt>Period</dt><dd id="d-period"></dd>
+        <dt>Allowlist</dt><dd id="d-allowlist"></dd>
+        <dt>Owner</dt><dd id="d-owner"></dd>
+        <dt>Agent</dt><dd id="d-agent"></dd>
+        <dt>Token</dt><dd id="d-token"></dd>
+      </dl>
+    </section>
+
+    <section class="panel">
+      <h2>Actions</h2>
+      <div class="actions">
+        <div>
+          <h3>Fund vault (anyone)</h3>
+          <div class="row">
+            <input id="deposit-amount" inputmode="decimal" placeholder="USDC, e.g. 5" aria-label="Deposit amount">
+            <button id="deposit" disabled>Deposit</button>
+          </div>
+        </div>
+        <div>
+          <h3>Pay (agent wallet)</h3>
+          <div class="row">
+            <input id="pay-to" class="addr" placeholder="Recipient 0x…" aria-label="Recipient">
+          </div>
+          <div class="row" style="margin-top:8px">
+            <input id="pay-amount" inputmode="decimal" placeholder="USDC" aria-label="Payment amount">
+            <input id="pay-memo" placeholder="Memo (≤ 32 bytes)" aria-label="Memo">
+            <button id="check" class="ghost">Check</button>
+            <button id="pay" disabled>Pay</button>
+          </div>
+        </div>
+        <div>
+          <h3>Owner controls</h3>
+          <div class="row">
+            <button id="pause" class="ghost" disabled>Pause</button>
+            <button id="unpause" class="ghost" disabled>Unpause</button>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <input id="withdraw-amount" inputmode="decimal" placeholder="USDC" aria-label="Withdraw amount">
+            <button id="withdraw" class="ghost" disabled>Withdraw to owner</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Recent payments</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>Recipient</th><th class="num">USDC</th><th>Memo</th><th>Tx</th></tr></thead>
+          <tbody id="payments"><tr><td colspan="5">–</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <footer>
+    Funds can only leave the vault through <code>pay</code> (agent, within policy) or <code>withdraw</code> (owner).
+    Source: <a href="https://github.com/Ishant5436/fastmcp-sentinel">github.com/Ishant5436/fastmcp-sentinel</a>.
+  </footer>
+</main>
+
+<script>
+"use strict";
+
+// ---- configuration --------------------------------------------------------------
+const NETWORKS = {
+  5042: { name: "Arc Mainnet", rpc: "https://rpc.mainnet.arc.io", explorer: "https://explorer.arc.io", usdc: "0x3600000000000000000000000000000000000000" },
+  5042002: { name: "Arc Testnet", rpc: "https://rpc.testnet.arc.network", explorer: "https://testnet.arcscan.app", usdc: "0x3600000000000000000000000000000000000000" },
+};
+// Selectors / topics are pinned and verified against the Foundry artifact by tests/test_app.py.
+const SEL = {
+  policy: "0505c8c9", check: "96fb7217", pay: "5e5571ac", pause: "8456cb59", unpause: "3f4ba83a",
+  withdraw: "f3fef3a3", transfer: "a9059cbb",
+};
+const PAYMENT_TOPIC = "0xabcefd63f1c3fa546491ac11efb08637a655ec1410d76875df7f453253a49d08";
+const STATUS = ["OK", "PAUSED", "INVALID_RECIPIENT", "INVALID_AMOUNT", "EXCEEDS_SINGLE_LIMIT", "EXCEEDS_PERIOD_LIMIT", "NOT_ALLOWLISTED", "INSUFFICIENT_BALANCE"];
+const LOG_LOOKBACK_BLOCKS = 9000n;
+
+const params = new URLSearchParams(location.search);
+const customChain = params.get("chain") ? Number(params.get("chain")) : null;
+if (customChain && !NETWORKS[customChain]) {
+  NETWORKS[customChain] = { name: `Chain ${customChain}`, rpc: params.get("rpc") || "", explorer: "", usdc: params.get("usdc") || "" };
+}
+if (params.get("rpc") && customChain) NETWORKS[customChain].rpc = params.get("rpc");
+
+const $ = (id) => document.getElementById(id);
+const state = { chainId: customChain || 5042, vault: null, policy: null, account: null };
+
+// ---- ABI helpers ----------------------------------------------------------------
+const isAddr = (a) => /^0x[0-9a-fA-F]{40}$/.test(a || "");
+const word = (hex) => hex.replace(/^0x/, "").toLowerCase().padStart(64, "0");
+const wordAddr = (a) => { if (!isAddr(a)) throw new Error(`Invalid address: ${a || "(empty)"}`); return word(a); };
+const wordUint = (n) => BigInt(n).toString(16).padStart(64, "0");
+const words = (hex) => { const h = hex.replace(/^0x/, ""); const out = []; for (let i = 0; i + 64 <= h.length; i += 64) out.push(BigInt("0x" + h.slice(i, i + 64))); return out; };
+const asAddr = (w) => "0x" + w.toString(16).padStart(40, "0").slice(-40);
+
+function parseUsdc(text) {
+  const t = String(text || "").trim();
+  if (!/^\d+(\.\d{1,6})?$/.test(t)) throw new Error("Enter a positive USDC amount with at most 6 decimals");
+  const [whole, frac = ""] = t.split(".");
+  const units = BigInt(whole) * 1000000n + BigInt(frac.padEnd(6, "0"));
+  if (units <= 0n) throw new Error("Amount must be greater than zero");
+  return units;
+}
+function fmtUsdc(units) {
+  const neg = units < 0n; const u = neg ? -units : units;
+  const whole = u / 1000000n; const frac = (u % 1000000n).toString().padStart(6, "0").replace(/0{1,4}$/, "");
+  return `${neg ? "-" : ""}${whole.toLocaleString("en-US")}.${frac.padEnd(2, "0")}`;
+}
+function encodeMemo(memo) {
+  if (/^0x[0-9a-fA-F]{64}$/.test(memo)) return memo.slice(2).toLowerCase();
+  const bytes = new TextEncoder().encode(memo || "");
+  if (bytes.length > 32) throw new Error("Memo must be at most 32 bytes");
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("").padEnd(64, "0");
+}
+function decodeMemo(hex) {
+  const bytes = hex.replace(/^0x/, "").match(/../g).map((b) => parseInt(b, 16));
+  let end = bytes.length; while (end > 0 && bytes[end - 1] === 0) end--;
+  const slice = bytes.slice(0, end);
+  if (slice.every((b) => b >= 0x20 && b < 0x7f)) return slice.length ? String.fromCharCode(...slice) : "";
+  return hex.slice(0, 10) + "…";
+}
+const short = (a) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "");
+
+// ---- RPC --------------------------------------------------------------------------
+let rpcId = 0;
+async function rpc(method, params) {
+  const net = NETWORKS[state.chainId];
+  if (!net.rpc) throw new Error("No RPC URL configured for this network");
+  const res = await fetch(net.rpc, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }) });
+  const body = await res.json();
+  if (body.error) throw new Error(body.error.message || "RPC error");
+  return body.result;
+}
+const call = (to, data) => rpc("eth_call", [{ to, data }, "latest"]);
+
+function log(msg, cls) { const el = $("log"); el.textContent = msg; el.className = cls || ""; }
+
+// ---- reads --------------------------------------------------------------------------
+async function loadVault(address) {
+  if (!isAddr(address)) throw new Error("Enter a valid vault address");
+  log("Loading vault…");
+  const w = words(await call(address, "0x" + SEL.policy));
+  if (w.length < 11) throw new Error("Address does not look like a SentinelVault on this network");
+  const p = {
+    owner: asAddr(w[0]), agent: asAddr(w[1]), token: asAddr(w[2]), maxPerTx: w[3], maxPerPeriod: w[4],
+    periodSeconds: w[5], periodStart: w[6], spent: w[7], allowlist: w[8] === 1n, paused: w[9] === 1n, balance: w[10],
+  };
+  state.vault = address; state.policy = p;
+  render(p);
+  const url = new URL(location.href); url.searchParams.set("vault", address);
+  if (state.chainId !== 5042) url.searchParams.set("chain", String(state.chainId));
+  history.replaceState(null, "", url);
+  log(`Loaded vault on ${NETWORKS[state.chainId].name}.`, "ok");
+  loadPayments(address).catch((e) => { $("payments").innerHTML = `<tr><td colspan="5">Could not load events: ${escapeHtml(e.message)}</td></tr>`; });
+}
+
+function render(p) {
+  $("dashboard").hidden = false;
+  const remaining = p.maxPerPeriod > p.spent ? p.maxPerPeriod - p.spent : 0n;
+  $("s-balance").textContent = fmtUsdc(p.balance);
+  $("s-maxtx").textContent = fmtUsdc(p.maxPerTx);
+  $("s-spent").textContent = fmtUsdc(p.spent);
+  $("s-remaining").textContent = fmtUsdc(remaining);
+  $("s-meter").style.width = `${p.maxPerPeriod ? Number((p.spent * 1000n) / p.maxPerPeriod) / 10 : 0}%`;
+  $("d-status").innerHTML = p.paused ? '<span class="badge bad">Paused</span>' : '<span class="badge ok">Active</span>';
+  const hours = Number(p.periodSeconds) / 3600;
+  const ends = new Date((Number(p.periodStart) + Number(p.periodSeconds)) * 1000);
+  $("d-period").textContent = `${fmtUsdc(p.maxPerPeriod)} USDC per ${hours >= 1 ? hours + " h" : p.periodSeconds + " s"} · resets ${ends.toLocaleString()}`;
+  $("d-allowlist").textContent = p.allowlist ? "Enabled (only approved recipients)" : "Disabled (any recipient)";
+  $("d-owner").textContent = p.owner; $("d-agent").textContent = p.agent; $("d-token").textContent = p.token;
+  updateButtons();
+}
+
+async function loadPayments(address) {
+  const latest = BigInt(await rpc("eth_blockNumber", []));
+  const from = latest > LOG_LOOKBACK_BLOCKS ? latest - LOG_LOOKBACK_BLOCKS : 0n;
+  const logs = await rpc("eth_getLogs", [{ address, topics: [PAYMENT_TOPIC], fromBlock: "0x" + from.toString(16), toBlock: "latest" }]);
+  const rows = logs.slice(-25).reverse().map((l) => {
+    const [amount] = words(l.data);
+    const id = BigInt(l.topics[1]); const to = asAddr(BigInt(l.topics[2]));
+    const explorer = NETWORKS[state.chainId].explorer;
+    const tx = explorer ? `<a href="${explorer}/tx/${l.transactionHash}" target="_blank" rel="noopener">${short(l.transactionHash)}</a>` : short(l.transactionHash);
+    return `<tr><td>${id}</td><td class="mono">${short(to)}</td><td class="num">${fmtUsdc(amount)}</td><td>${escapeHtml(decodeMemo(l.topics[3]))}</td><td class="mono">${tx}</td></tr>`;
+  });
+  $("payments").innerHTML = rows.length ? rows.join("") : `<tr><td colspan="5">No payments in the last ${LOG_LOOKBACK_BLOCKS} blocks.</td></tr>`;
+}
+
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]); }
+
+// ---- wallet -------------------------------------------------------------------------
+function updateButtons() {
+  const p = state.policy; const a = (state.account || "").toLowerCase();
+  const connected = Boolean(state.account && p);
+  $("deposit").disabled = !connected;
+  $("pay").disabled = !(connected && a === p.agent.toLowerCase());
+  for (const id of ["pause", "unpause", "withdraw"]) $(id).disabled = !(connected && a === p.owner.toLowerCase());
+  $("connect").textContent = state.account ? short(state.account) : "Connect wallet";
+}
+
+async function connect() {
+  if (!window.ethereum) throw new Error("No browser wallet found. Install one to deposit or pay.");
+  const [account] = await window.ethereum.request({ method: "eth_requestAccounts" });
+  state.account = account;
+  await ensureChain();
+  updateButtons();
+  log(`Connected ${short(account)}.`, "ok");
+}
+
+async function ensureChain() {
+  const hex = "0x" + state.chainId.toString(16);
+  const current = await window.ethereum.request({ method: "eth_chainId" });
+  if (current === hex) return;
+  const net = NETWORKS[state.chainId];
+  try {
+    await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: hex }] });
+  } catch (err) {
+    if (err && err.code !== 4902) throw err;
+    await window.ethereum.request({
+      method: "wallet_addEthereumChain",
+      params: [{ chainId: hex, chainName: net.name, rpcUrls: [net.rpc], nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 }, blockExplorerUrls: net.explorer ? [net.explorer] : [] }],
+    });
+  }
+}
+
+async function send(to, data, label) {
+  if (!state.account) throw new Error("Connect a wallet first");
+  await ensureChain();
+  log(`${label}: confirm in your wallet…`);
+  const hash = await window.ethereum.request({ method: "eth_sendTransaction", params: [{ from: state.account, to, data, value: "0x0" }] });
+  log(`${label}: submitted ${hash}. Waiting for confirmation…`);
+  for (let i = 0; i < 120; i++) {
+    const receipt = await rpc("eth_getTransactionReceipt", [hash]);
+    if (receipt) {
+      if (receipt.status !== "0x1") throw new Error(`${label} reverted (tx ${hash})`);
+      await loadVault(state.vault);
+      // Log after the refresh so the tx hash stays visible (needed for submission evidence).
+      log(`${label}: confirmed in block ${BigInt(receipt.blockNumber)} · tx ${hash}`, "ok");
+      return hash;
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error(`Timed out waiting for ${hash}`);
+}
+
+async function checkPayment() {
+  const to = $("pay-to").value.trim(); const amount = parseUsdc($("pay-amount").value);
+  const [status, remaining] = words(await call(state.vault, "0x" + SEL.check + wordAddr(to) + wordUint(amount)));
+  const name = STATUS[Number(status)] || `UNKNOWN(${status})`;
+  log(`Vault says: ${name} · remaining this period ${fmtUsdc(remaining)} USDC`, name === "OK" ? "ok" : "warn");
+  return name;
+}
+
+// ---- wiring -------------------------------------------------------------------------
+function guard(fn) { return async (ev) => { if (ev) ev.preventDefault(); try { await fn(); } catch (e) { log(e.message || String(e), "bad"); } }; }
+
+for (const [id, net] of Object.entries(NETWORKS)) {
+  const opt = document.createElement("option"); opt.value = id; opt.textContent = net.name; $("network").append(opt);
+}
+$("network").value = String(state.chainId);
+$("network").addEventListener("change", guard(async () => { state.chainId = Number($("network").value); if (state.vault) await loadVault(state.vault); }));
+$("load").addEventListener("submit", guard(() => loadVault($("vault").value.trim())));
+$("connect").addEventListener("click", guard(connect));
+$("deposit").addEventListener("click", guard(() => {
+  const amount = parseUsdc($("deposit-amount").value);
+  return send(state.policy.token, "0x" + SEL.transfer + wordAddr(state.vault) + wordUint(amount), "Deposit");
+}));
+$("check").addEventListener("click", guard(checkPayment));
+$("pay").addEventListener("click", guard(async () => {
+  if ((await checkPayment()) !== "OK") throw new Error("Vault policy would reject this payment");
+  const to = $("pay-to").value.trim(); const amount = parseUsdc($("pay-amount").value);
+  return send(state.vault, "0x" + SEL.pay + wordAddr(to) + wordUint(amount) + encodeMemo($("pay-memo").value), "Payment");
+}));
+$("pause").addEventListener("click", guard(() => send(state.vault, "0x" + SEL.pause, "Pause")));
+$("unpause").addEventListener("click", guard(() => send(state.vault, "0x" + SEL.unpause, "Unpause")));
+$("withdraw").addEventListener("click", guard(() => {
+  const amount = parseUsdc($("withdraw-amount").value);
+  return send(state.vault, "0x" + SEL.withdraw + wordAddr(state.policy.owner) + wordUint(amount), "Withdraw");
+}));
+if (window.ethereum && window.ethereum.on) {
+  window.ethereum.on("accountsChanged", (accs) => { state.account = accs[0] || null; updateButtons(); });
+}
+
+const initialVault = params.get("vault");
+if (initialVault) { $("vault").value = initialVault; guard(() => loadVault(initialVault))(); }
+</script>
+</body>
+</html>

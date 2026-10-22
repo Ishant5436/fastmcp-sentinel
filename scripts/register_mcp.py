@@ -1,90 +1,100 @@
 #!/usr/bin/env python3
-"""Universal 6-Target FastMCP-Sentinel Registration Script."""
+"""Register FastMCP-Sentinel with locally installed MCP hosts.
 
-import os
-import json
+Adds a ``fastmcp-sentinel`` entry to each existing host config file, pointing at
+the Python interpreter running this script. Each file is backed up (``.bak``)
+and rewritten atomically. Use ``--dry-run`` to preview.
+"""
+
+from __future__ import annotations
+
+import argparse
 import asyncio
+import json
+import os
+import shutil
+import sys
+import tempfile
 from pathlib import Path
-from fastmcp_sentinel.server import mcp
+from typing import Any, Dict
 
 SERVER_NAME = "fastmcp-sentinel"
-SERVER_CONFIG = {
-    "command": "/Users/ishantpanchal/fastmcp-sentinel/venv/bin/python",
-    "args": ["-m", "fastmcp_sentinel.cli", "serve"],
-    "env": {
-        "PYTHONPATH": "/Users/ishantpanchal/fastmcp-sentinel/src"
-    }
-}
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 CONFIG_FILES = [
-    os.path.expanduser("~/.gemini/antigravity/mcp_config.json"),
-    os.path.expanduser("~/.gemini/config/mcp_config.json"),
-    os.path.expanduser("~/.gemini/antigravity-ide/mcp_config.json"),
-    os.path.expanduser("~/.gemini/antigravity-cli/mcp_config.json"),
-    os.path.expanduser("~/Library/Application Support/Claude/claude_desktop_config.json"),
-    os.path.expanduser("~/.claude.json"),
+    Path("~/.gemini/antigravity/mcp_config.json"),
+    Path("~/.gemini/config/mcp_config.json"),
+    Path("~/.gemini/antigravity-ide/mcp_config.json"),
+    Path("~/.gemini/antigravity-cli/mcp_config.json"),
+    Path("~/Library/Application Support/Claude/claude_desktop_config.json"),
+    Path("~/.config/Claude/claude_desktop_config.json"),
+    Path("~/.claude.json"),
 ]
 
-SCHEMA_DIR = Path(os.path.expanduser("~/.gemini/antigravity-cli/mcp")) / SERVER_NAME
+SCHEMA_DIR = Path("~/.gemini/antigravity-cli/mcp").expanduser() / SERVER_NAME
 
 
-async def register():
-    print("=" * 70)
-    print("  REGISTERING FASTMCP-SENTINEL ACROSS 6 MCP TARGETS")
-    print("=" * 70)
+def server_config() -> Dict[str, Any]:
+    cfg: Dict[str, Any] = {"command": sys.executable, "args": ["-m", "fastmcp_sentinel.cli", "serve"]}
+    src = REPO_ROOT / "src"
+    if (src / "fastmcp_sentinel").is_dir():
+        cfg["env"] = {"PYTHONPATH": str(src)}
+    return cfg
 
-    # 1. Update all 6 JSON config files
-    for path_str in CONFIG_FILES:
-        path = Path(path_str)
+
+def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+async def register(dry_run: bool) -> int:
+    from fastmcp_sentinel.server import INSTRUCTIONS, mcp
+
+    cfg = server_config()
+    failures = 0
+    for path in (p.expanduser() for p in CONFIG_FILES):
         if not path.exists():
-            print(f"  [WARN] Skipping non-existent path: {path}")
+            print(f"  [SKIP] {path} (not found)")
             continue
-
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = json.loads(path.read_text(encoding="utf-8") or "{}")
+            data.setdefault("mcpServers", {})[SERVER_NAME] = cfg
+            if dry_run:
+                print(f"  [DRY ] would register in {path}")
+                continue
+            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+            atomic_write_json(path, data)
+            print(f"  [PASS] Registered in {path}")
+        except (OSError, ValueError) as e:
+            failures += 1
+            print(f"  [FAIL] {path}: {e}")
 
-            if "mcpServers" not in data:
-                data["mcpServers"] = {}
+    if SCHEMA_DIR.parent.exists() and not dry_run:
+        SCHEMA_DIR.mkdir(parents=True, exist_ok=True)
+        for t in await mcp.list_tools():
+            schema = {"name": t.name, "description": (t.description or "").strip(), "parameters": t.inputSchema}
+            (SCHEMA_DIR / f"{t.name}.json").write_text(json.dumps(schema, indent=2), encoding="utf-8")
+        instructions = f"# FastMCP-Sentinel MCP Instructions\n\n{INSTRUCTIONS}"
+        (SCHEMA_DIR / "instructions.md").write_text(instructions, encoding="utf-8")
+        print(f"  [PASS] Tool schemas written to {SCHEMA_DIR}")
 
-            data["mcpServers"][SERVER_NAME] = SERVER_CONFIG
+    print(json.dumps({"mcpServers": {SERVER_NAME: cfg}}, indent=2))
+    return 1 if failures else 0
 
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
 
-            print(f"  [PASS] Registered in: {path}")
-        except Exception as e:
-            print(f"  [FAIL] Failed to update {path}: {e}")
-
-    # 2. Write tool JSON schemas and instructions.md
-    SCHEMA_DIR.mkdir(parents=True, exist_ok=True)
-    tools = await mcp.list_tools()
-
-    for t in tools:
-        tool_file = SCHEMA_DIR / f"{t.name}.json"
-        tool_schema = {
-            "name": t.name,
-            "description": t.description.strip(),
-            "parameters": t.inputSchema,
-        }
-        with open(tool_file, "w", encoding="utf-8") as f:
-            json.dump(tool_schema, f, indent=2)
-        print(f"  [PASS] Tool Schema Generated: {tool_file.name}")
-
-    instructions_file = SCHEMA_DIR / "instructions.md"
-    with open(instructions_file, "w", encoding="utf-8") as f:
-        f.write("""# FastMCP-Sentinel MCP Instructions
-Always call `sentinel_validate_calldata` and `sentinel_simulate_transaction` before authorizing any Web3 transaction or executing onchain state changes.
-Use `sentinel_rpc_cache` to retrieve static network parameters (chainId, gasPrice, blockNumber).
-Enforce budget safety with `sentinel_agent_guard`.
-Verify C++ safety guarantees with `sentinel_audit_invariants`.
-""")
-    print(f"  [PASS] Instructions Generated: {instructions_file.name}")
-
-    print("-" * 70)
-    print("  6-TARGET REGISTRATION COMPLETED SUCCESSFULLY")
-    print("=" * 70)
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true", help="Show what would change without writing")
+    return asyncio.run(register(parser.parse_args().dry_run))
 
 
 if __name__ == "__main__":
-    asyncio.run(register())
+    sys.exit(main())
