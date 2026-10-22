@@ -60,6 +60,40 @@ jobs:
           name: coverage-xml
           path: coverage.xml
 
+  contracts:
+    name: Contracts + on-chain integration (Foundry, anvil, browser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+      - name: forge fmt
+        working-directory: contracts
+        run: forge fmt --check
+      - name: forge build
+        working-directory: contracts
+        run: forge build --sizes
+      - name: forge test (unit + fuzz)
+        working-directory: contracts
+        env:
+          FOUNDRY_PROFILE: ci
+        run: forge test -vvv
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and browser
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,e2e]"
+          python -m playwright install --with-deps chromium
+          make csrc
+      - name: Python vault client + web app against anvil
+        run: pytest tests/test_vault.py tests/test_app.py -v -rs
+
   native-sanitizers:
     name: Native tests (ASan + UBSan)
     runs-on: ubuntu-latest

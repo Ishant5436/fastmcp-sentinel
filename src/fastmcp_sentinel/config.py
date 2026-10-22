@@ -16,7 +16,16 @@ ARC_CHAIN_ID: int = 5042
 ARC_RPC_URL: str = os.environ.get("ARC_RPC_URL", "https://rpc.mainnet.arc.io")
 ARC_EXPLORER_URL: str = "https://explorer.arc.io"
 ARC_GAS_TOKEN: str = "USDC"  # noqa: S105 - asset symbol, not a secret
+# USDC on Arc has two views of one balance: the native gas token (18 decimals, used for
+# gas and msg.value) and the ERC-20 interface below (6 decimals). Factor: 10**12.
 ARC_USDC_DECIMALS: int = 6
+ARC_NATIVE_DECIMALS: int = 18
+ARC_USDC_ADDRESS: str = "0x3600000000000000000000000000000000000000"
+
+# Arc Testnet
+ARC_TESTNET_CHAIN_ID: int = 5042002
+ARC_TESTNET_RPC_URL: str = os.environ.get("ARC_TESTNET_RPC_URL", "https://rpc.testnet.arc.network")
+ARC_TESTNET_EXPLORER_URL: str = "https://testnet.arcscan.app"
 
 # Arc Mainnet Session Financial Limits (USDC native units: 10^6)
 ARC_MAX_SINGLE_TX_USDC: float = 10.0
@@ -27,6 +36,7 @@ ARC_MAX_SESSION_SPEND_BASE_UNITS: int = int(ARC_MAX_SESSION_SPEND_USDC * (10**AR
 # Multi-Chain RPC Directory
 SUPPORTED_RPC_ENDPOINTS: Dict[int, str] = {
     5042: ARC_RPC_URL,
+    5042002: ARC_TESTNET_RPC_URL,
     1: os.environ.get("ETH_RPC_URL", "https://cloudflare-eth.com"),
     42161: os.environ.get("ARB_RPC_URL", "https://arb1.arbitrum.io/rpc"),
     8453: os.environ.get("BASE_RPC_URL", "https://mainnet.base.org"),
@@ -45,6 +55,12 @@ def base_units_to_usdc(units: int) -> float:
     """Convert 6-decimal integer base units to human USDC float."""
     assert units >= 0, "Base units cannot be negative"
     return float(units) / (10**ARC_USDC_DECIMALS)
+
+
+def native_to_usdc(native_units: int) -> float:
+    """Convert Arc native-balance units (18 decimals, i.e. "wei") to human USDC."""
+    assert native_units >= 0, "Native units cannot be negative"
+    return float(native_units) / (10**ARC_NATIVE_DECIMALS)
 
 
 class ConfigError(ValueError):
@@ -119,6 +135,8 @@ class SentinelSettings:
     rpc_timeout_seconds: float = 5.0
     cache_default_ttl_seconds: float = 0.0
     default_rpc_url: str = ARC_RPC_URL
+    default_chain_id: int = ARC_CHAIN_ID
+    vault_address: str = ""
     rpc_endpoints: Mapping[int, str] = field(default_factory=lambda: dict(SUPPORTED_RPC_ENDPOINTS))
 
     @classmethod
@@ -137,4 +155,6 @@ class SentinelSettings:
             rpc_timeout_seconds=_env_float(e, "SENTINEL_RPC_TIMEOUT_SECONDS", cls.rpc_timeout_seconds, 0.1),
             cache_default_ttl_seconds=_env_float(e, "SENTINEL_CACHE_DEFAULT_TTL_SECONDS", 0.0),
             default_rpc_url=e.get("ARC_RPC_URL", ARC_RPC_URL),
+            default_chain_id=_env_int(e, "SENTINEL_DEFAULT_CHAIN_ID", ARC_CHAIN_ID, 1),
+            vault_address=e.get("SENTINEL_VAULT_ADDRESS", "").strip(),
         )

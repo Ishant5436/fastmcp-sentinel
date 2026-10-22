@@ -58,3 +58,19 @@ clean:
 	$(MAKE) -C csrc clean
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage coverage.xml htmlcov build dist *.egg-info
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
+
+# --- Smart contracts (Foundry) ---------------------------------------------------
+.PHONY: contracts contracts-test contracts-fmt app
+
+contracts:
+	cd contracts && forge build
+
+contracts-test:
+	cd contracts && forge test -vvv
+
+contracts-fmt:
+	cd contracts && forge fmt
+
+app:
+	@echo "Serving app/ at http://127.0.0.1:8000/?vault=<address>"
+	$(PYTHON) -m http.server 8000 --directory app

@@ -50,6 +50,35 @@ FastMCP-Sentinel is a high-performance, deterministic safety gateway for autonom
 
 ---
 
+## On-Chain Enforcement on Arc: SentinelVault
+
+Off-chain checks only help if the agent goes through them. **SentinelVault** moves the spend
+policy into a contract on Arc, where USDC is the gas token: the agent's USDC lives in the vault, and
+the agent key can only move it through `pay`, within limits the contract enforces.
+
+```
+ Owner (human) ── funds, sets policy, pause, withdraw ──┐
+                                                         v
+ AI agent ── MCP ──> FastMCP-Sentinel ──(unsigned tx)──> agent wallet ──pay()──> SentinelVault ──USDC──> recipient
+                     policy check · C++ gate ·                                   per-tx cap · per-period cap
+                     eth_call simulation · gas                                   allowlist · pause · events
+```
+
+| Component | Path | What it does |
+| :--- | :--- | :--- |
+| `SentinelVault.sol` | `contracts/src/` | USDC vault with per-tx / per-period caps, recipient allowlist, pause, owner withdraw, `check` dry-run, `Payment` events |
+| Foundry tests | `contracts/test/` | 20 unit + fuzz tests, including "`check` predicts `pay`" and "period cap always holds" properties |
+| `sentinel_arc_vault` | `src/fastmcp_sentinel/server.py` | MCP tool: read policy, on-chain check, and `prepare_payment` (policy → C++ gate → simulation → gas → unsigned tx) |
+| Dashboard | `app/index.html` | Static web app: live policy and payment history from Arc; deposit, pay, pause, withdraw with a browser wallet |
+
+![SentinelVault dashboard](assets/vault-dashboard.png)
+
+**Deploy it:** [`docs/ARC_DEPLOYMENT.md`](docs/ARC_DEPLOYMENT.md) (Foundry script, GitHub Pages hosting, and how to
+capture contract addresses and USDC transaction hashes). **Grant submission:**
+[`SUBMISSION_ARC_MICROGRANTS.md`](SUBMISSION_ARC_MICROGRANTS.md).
+
+---
+
 ## Strategic Track & Application Alignment
 
 FastMCP-Sentinel is engineered to target both enterprise industrial challenges and high-stakes autonomous agent infrastructure:
@@ -57,7 +86,7 @@ FastMCP-Sentinel is engineered to target both enterprise industrial challenges a
 ### 1. Arc Mainnet & Web3 Autonomous Execution
 Autonomous agents interacting with Arc Mainnet (Chain ID 5042) require deterministic pre-execution guarantees to protect native USDC balances:
 * **Zero-Mutation Revert Interception:** Pre-flights calldata and state transitions via local zero-mutation fork simulation before broadcast, preventing wasted USDC gas on reverted calls.
-* **Native USDC Spend Sandboxing:** Enforces per-session cumulative USDC caps ($50 USDC) and per-transaction limits ($10 USDC).
+* **Native USDC Spend Sandboxing:** Per-transaction ($10) and per-period ($50) USDC caps, enforced on-chain by SentinelVault and mirrored off-chain by the session guard.
 * **Token-Bucket Throttling:** Restricts automated agent polling loops, preventing accidental transaction bursts against Arc JSON-RPC nodes.
 * **Universal FastMCP Protocol:** Plugs natively into any standard FastMCP-compliant agent host.
 
@@ -96,7 +125,7 @@ Built upon Gerard J. Holzmann's **Power of 10 Safety Invariants**, eliminating m
 
 ## Native FastMCP Tools
 
-FastMCP-Sentinel exposes 5 tools via the Model Context Protocol stdio transport:
+FastMCP-Sentinel exposes 6 tools via the Model Context Protocol stdio transport:
 
 ### 1. `sentinel_validate_calldata`
 Validates EVM transaction parameters and calldata against the native safety invariants.
@@ -132,7 +161,17 @@ Enforces session-wide financial spend limits, address filtering, and rate limiti
   * `to_address` (str), `value_wei` (int, non-negative), `tx_hash` (str).
 * **Returns:** Permission decision, remaining session budget, and token bucket state.
 
-### 5. `sentinel_audit_invariants`
+### 5. `sentinel_arc_vault`
+Interacts with an on-chain SentinelVault (default network: Arc Mainnet).
+* **Arguments:**
+  * `action`: `"policy"`, `"check"`, or `"prepare_payment"`.
+  * `vault_address` (str): Vault to use (default: `SENTINEL_VAULT_ADDRESS`).
+  * `to_address` (str), `amount_usdc` (decimal string, e.g. `"2.50"`), `memo` (<= 32 bytes or 32-byte hex).
+  * `chain_id` (int): `5042` (Arc Mainnet, default) or `5042002` (Arc Testnet).
+* **Returns:** Policy and balances in base units and USDC; for `prepare_payment`, `ready` plus an unsigned
+  transaction (`chainId`, `from`, `to`, `data`, `gas`) for the agent wallet to sign. Nothing is signed by the server.
+
+### 6. `sentinel_audit_invariants`
 Runs the static Power of 10 audit of the C++ core.
 * **Arguments:** None.
 * **Returns:** Compliance boolean, violations list, audited functions, and per-rule breakdown.
@@ -159,6 +198,7 @@ make dev          # editable install with dev tools + build csrc/libsentinel_cor
 make all          # lint, type-check, tests, Power of 10 audit
 make sanitize     # native C++ tests under ASan + UBSan
 make demo         # 1-second end-to-end demonstration
+make contracts-test   # Foundry unit + fuzz tests for SentinelVault
 ```
 
 The CMake build is also available directly: `cmake -S . -B build && cmake --build build && ctest --test-dir build`.
@@ -202,7 +242,9 @@ All settings are environment variables. Defaults are **fail-closed**.
 | `SENTINEL_ALLOW_MOCK_RPC` | `false` | Allow `mock://` simulation (testing only) |
 | `SENTINEL_RPC_TIMEOUT_SECONDS` | `5` | JSON-RPC timeout |
 | `SENTINEL_CACHE_DEFAULT_TTL_SECONDS` | `0` (never) | Default cache entry TTL |
-| `ARC_RPC_URL`, `ETH_RPC_URL`, `ARB_RPC_URL`, `BASE_RPC_URL`, `OP_RPC_URL` | public endpoints | Per-chain RPC endpoints |
+| `SENTINEL_VAULT_ADDRESS` | empty | Default SentinelVault for `sentinel_arc_vault` |
+| `SENTINEL_DEFAULT_CHAIN_ID` | `5042` | Network for vault calls (`5042002` = Arc Testnet) |
+| `ARC_RPC_URL`, `ARC_TESTNET_RPC_URL`, `ETH_RPC_URL`, `ARB_RPC_URL`, `BASE_RPC_URL`, `OP_RPC_URL` | public endpoints | Per-chain RPC endpoints |
 | `SENTINEL_LIB_PATH` / `SENTINEL_CSRC_DIR` | auto | Override native library / audited source location |
 | `SENTINEL_LOG_LEVEL` | `INFO` (serve) | Logs go to stderr; guard decisions are logged for audit |
 
@@ -228,6 +270,9 @@ Measured on Apple Silicon M5 Pro (indicative; run `fastmcp-sentinel check` for n
 
 ```
 fastmcp-sentinel/
+├── contracts/                      # Foundry project: SentinelVault.sol, tests, deploy script
+├── app/index.html                  # Static vault dashboard (GitHub Pages)
+├── docs/ARC_DEPLOYMENT.md          # Arc Mainnet deployment runbook
 ├── csrc/
 │   ├── sentinel_core.hpp           # Power of 10 structs, arena bounds, error codes, ABI version
 │   ├── sentinel_core.cpp           # Validation kernel & ring-buffer cache
@@ -236,7 +281,8 @@ fastmcp-sentinel/
 │   ├── bridge.py                   # ctypes wrapper with ABI/layout checks and input hardening
 │   ├── simulation.py               # eth_call / eth_estimateGas simulation & revert decoding
 │   ├── guard.py                    # Thread-safe spend limits & token-bucket limiter
-│   ├── server.py                   # FastMCP server exposing the 5 tools
+│   ├── server.py                   # FastMCP server exposing the 6 tools
+│   ├── vault.py                    # Dependency-free SentinelVault ABI client
 │   ├── config.py                   # Network constants and environment-driven settings
 │   ├── paths.py                    # Native library / source discovery
 │   ├── audit.py                    # Power of 10 static analysis engine
@@ -245,6 +291,8 @@ fastmcp-sentinel/
 │   ├── native/                     # C++ unit tests (CTest, sanitizers)
 │   ├── test_security.py            # Regression tests for safety bypasses
 │   ├── test_stdio_e2e.py           # Real MCP stdio client <-> server round-trip
+│   ├── test_vault.py               # Vault client + live anvil integration
+│   ├── test_app.py                 # Dashboard in a real browser against anvil
 │   └── ...                         # Bridge, guard, simulation, audit, CLI, tool tests
 ├── scripts/                        # Audit, demo, and MCP host registration helpers
 ├── CMakeLists.txt                  # Library, native tests, sanitizer option, wheel install

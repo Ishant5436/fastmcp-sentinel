@@ -30,14 +30,15 @@ Every guard decision is logged to stderr (`fastmcp_sentinel.guard`) for auditing
 
 ## Known limitations
 
-* **Sentinel is advisory unless enforced at the signer.** If the agent can sign and broadcast
-  without going through Sentinel, it can skip the checks. For hard guarantees, put the signing key
-  behind a component that only signs transactions Sentinel has authorized.
+* **Off-chain checks are advisory unless funds sit behind SentinelVault.** If the agent's key holds
+  funds directly, it can sign and broadcast without going through Sentinel. Keep agent funds in a
+  `SentinelVault` (`contracts/`) so the per-transaction and per-period caps are enforced on-chain.
 * **Guard state is in-memory and per-process.** Restarting the server resets the session budget.
   Run one server per agent session, or persist state externally if budgets must survive restarts.
-* **`arc_status` unit conversion.** The guard is denominated in the chain's native base unit (wei by
-  default), while `arc_status` converts with USDC's 6 ERC-20 decimals. Configure the `SENTINEL_*_WEI`
-  limits in the base unit your deployment actually uses and verify the reported USDC figures.
+* **Units on Arc.** The session guard is denominated in native-balance units (18 decimals; on Arc
+  `10**18` = 1 USDC). SentinelVault and `sentinel_arc_vault` use USDC's ERC-20 interface (6 decimals).
+* **SentinelVault has not been externally audited.** It is small and covered by unit and fuzz tests,
+  but keep balances modest and use the owner's `pause` / `withdraw` if anything looks wrong.
 * **Simulation is a point-in-time `eth_call` against `latest`.** State can change between simulation
   and inclusion (front-running, price movement). Treat a successful simulation as necessary, not sufficient.
 * **The Power of 10 audit is a lightweight static checker** (comment/string-aware pattern and

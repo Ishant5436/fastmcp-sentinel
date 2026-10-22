@@ -10,6 +10,8 @@ from typing import Any, Dict
 
 import requests
 
+from fastmcp_sentinel.vault import decode_vault_error
+
 logger = logging.getLogger(__name__)
 
 ERROR_STRING_SELECTOR = "08c379a0"  # Error(string)
@@ -55,14 +57,14 @@ class RpcError(Exception):
         self.data = data
 
 
-def _extract_revert_data(data: Any) -> str:
+def extract_revert_data(data: Any) -> str:
     """Nodes disagree on where revert bytes live (``data``, ``data.data``, ``data.result``)."""
     if isinstance(data, str):
         return data
     if isinstance(data, dict):
         for k in ("data", "result", "originalError"):
             v = data.get(k)
-            found = _extract_revert_data(v)
+            found = extract_revert_data(v)
             if found:
                 return found
     return ""
@@ -110,6 +112,11 @@ class TransactionSimulator:
                 return "Execution reverted with Panic(uint256)"
             return PANIC_CODES.get(code, f"Panic code: {hex(code)}")
 
+        # Known SentinelVault custom errors
+        vault_error = decode_vault_error(hex_data)
+        if vault_error is not None:
+            return f"Execution reverted with {vault_error}"
+
         # Custom Solidity error: surface the selector so callers can look it up.
         if len(hex_data) >= 8:
             return f"Execution reverted with custom error 0x{hex_data[:8]}"
@@ -129,6 +136,16 @@ class TransactionSimulator:
                 raise RpcError(str(err.get("message", "JSON-RPC error")), err.get("data"))
             raise RpcError(str(err))
         return body.get("result")
+
+    def eth_call(self, tx: Dict[str, Any], block: str = "latest") -> str:
+        """Raw ``eth_call``. Raises :class:`RpcError` (with revert data) or ``requests`` errors."""
+        result = self._rpc("eth_call", [tx, block])
+        if not isinstance(result, str):
+            raise RpcError("eth_call returned a non-hex result")
+        return result
+
+    def estimate_gas(self, tx: Dict[str, Any]) -> int:
+        return int(self._rpc("eth_estimateGas", [tx]), 16)
 
     def _mock(self, data: str) -> SimulationResult:
         if "mock_revert" in data or "revert" in self.rpc_url:
@@ -169,7 +186,7 @@ class TransactionSimulator:
         try:
             return_data = self._rpc("eth_call", [tx_obj, "latest"])
         except RpcError as err:
-            raw = _extract_revert_data(err.data)
+            raw = extract_revert_data(err.data)
             reason = self.decode_revert_reason(raw) if raw else str(err)
             return SimulationResult(success=False, gas_used=0, return_data=raw or "0x", revert_reason=reason)
         except (requests.RequestException, ValueError) as err:

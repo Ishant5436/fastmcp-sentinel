@@ -37,6 +37,10 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
     "types-requests",
+    "pycryptodome>=3.20",
+]
+e2e = [
+    "playwright>=1.45",
 ]
 
 [project.urls]
@@ -53,7 +57,10 @@ wheel.packages = ["src/fastmcp_sentinel"]
 # The native library is loaded via ctypes (no CPython ABI), so one wheel per platform suffices.
 wheel.py-api = "py3"
 cmake.build-type = "Release"
-sdist.exclude = ["assets/*.mp4", "assets/*.gif", "venv", ".venv", "build", "csrc/*.so", "csrc/*.dylib"]
+sdist.exclude = [
+    "assets/*.mp4", "assets/*.gif", "venv", ".venv", "build", "csrc/*.so", "csrc/*.dylib",
+    "contracts/lib", "contracts/out", "contracts/cache", "contracts/broadcast",
+]
 
 [tool.scikit-build.metadata.version]
 provider = "scikit_build_core.metadata.regex"

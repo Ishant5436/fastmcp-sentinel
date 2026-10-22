@@ -3,6 +3,23 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-10-22
+
+### Added
+- `SentinelVault` Solidity contract (Foundry project in `contracts/`): USDC vault for AI agents on Arc with
+  per-transaction and per-period caps, recipient allowlist, pause, owner withdraw, two-step ownership,
+  `check` dry-run, and `Payment` events. 20 unit + fuzz tests; deploy script for Arc Mainnet/Testnet.
+- `sentinel_arc_vault` MCP tool: read policy, on-chain check, and `prepare_payment` (policy check, native
+  calldata gate, `eth_call` simulation from the agent, gas estimate, unsigned tx).
+- Static dashboard (`app/index.html`) with deposit / pay / pause / withdraw via a browser wallet; GitHub Pages workflow.
+- Arc Testnet (5042002) endpoint, USDC ERC-20 address, `SENTINEL_VAULT_ADDRESS`, `SENTINEL_DEFAULT_CHAIN_ID`.
+- Revert decoding for SentinelVault custom errors.
+- Integration tests: Python vault client and the dashboard (real Chromium) against anvil; CI contracts job.
+- `docs/ARC_DEPLOYMENT.md` runbook and `SUBMISSION_ARC_MICROGRANTS.md`.
+
+### Fixed
+- `arc_status` converted native-balance values with 6 decimals; Arc's native USDC uses 18 (ERC-20 view: 6).
+
 ## [1.1.0] - 2026-10-22
 
 ### Security

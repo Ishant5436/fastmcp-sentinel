@@ -26,12 +26,24 @@ from fastmcp_sentinel.bridge import SentinelBridge, SentinelStatusCode, get_brid
 from fastmcp_sentinel.config import (
     ARC_CHAIN_ID,
     ARC_GAS_TOKEN,
+    ARC_NATIVE_DECIMALS,
     SentinelSettings,
-    base_units_to_usdc,
+    native_to_usdc,
 )
 from fastmcp_sentinel.guard import GuardConfig, StatefulAgentGuard
 from fastmcp_sentinel.paths import find_csrc_dir
-from fastmcp_sentinel.simulation import EvmSimulator
+from fastmcp_sentinel.simulation import EvmSimulator, RpcError, extract_revert_data
+from fastmcp_sentinel.vault import (
+    VaultStatus,
+    decode_check,
+    decode_policy,
+    encode_check,
+    encode_pay,
+    encode_policy,
+    format_usdc,
+    parse_usdc,
+    require_address,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +54,9 @@ Before signing or broadcasting any transaction:
 2. Call `sentinel_simulate_transaction` and require `success`.
 3. Call `sentinel_agent_guard` with action `authorize` and require `allowed`
    (this atomically reserves the spend against the session budget).
+For USDC payments on Arc, prefer `sentinel_arc_vault` with action `prepare_payment`:
+the SentinelVault contract enforces the spend policy on-chain, and the tool returns a
+pre-checked, pre-simulated unsigned transaction for the agent wallet to sign.
 Use `sentinel_rpc_cache` with a TTL for volatile reads (gasPrice, blockNumber).
 """
 
@@ -254,8 +269,10 @@ def sentinel_agent_guard(
         status["network"] = "Arc Mainnet"
         status["chain_id"] = ARC_CHAIN_ID
         status["gas_asset"] = ARC_GAS_TOKEN
-        status["session_spend_usdc"] = base_units_to_usdc(status.get("session_spend_wei", 0))
-        status["remaining_session_budget_usdc"] = base_units_to_usdc(status.get("remaining_session_budget_wei", 0))
+        # Guard values are native-balance units; on Arc the native token is USDC with 18 decimals.
+        status["native_decimals"] = ARC_NATIVE_DECIMALS
+        status["session_spend_usdc"] = native_to_usdc(status.get("session_spend_wei", 0))
+        status["remaining_session_budget_usdc"] = native_to_usdc(status.get("remaining_session_budget_wei", 0))
         return status
     if action == "reset":
         if not state.settings.allow_agent_reset:
@@ -266,6 +283,112 @@ def sentinel_agent_guard(
         guard.reset_session()
         return {"status": "reset"}
     raise ValueError(f"Unknown guard action {action!r}")
+
+
+def _vault_context(vault_address: str, chain_id: int) -> tuple[EvmSimulator, str, int]:
+    state = _get_state()
+    settings = state.settings
+    vault = (vault_address or settings.vault_address).strip()
+    if not vault:
+        raise ValueError("vault_address is required (or set SENTINEL_VAULT_ADDRESS)")
+    require_address(vault, "vault_address")
+    cid = chain_id or settings.default_chain_id
+    url, _ = _resolve_rpc(settings, "", cid)
+    return state.simulator(url), vault, cid
+
+
+def _vault_call(sim: EvmSimulator, vault: str, data: str, sender: str | None = None) -> str:
+    tx: Dict[str, Any] = {"to": vault, "data": data}
+    if sender:
+        tx["from"] = sender
+    return sim.eth_call(tx)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=False, openWorldHint=True))
+def sentinel_arc_vault(
+    action: Literal["policy", "check", "prepare_payment"],
+    vault_address: str = "",
+    to_address: str = "",
+    amount_usdc: str = "",
+    memo: str = "",
+    chain_id: int = 0,
+) -> Dict[str, Any]:
+    """Interact with an on-chain SentinelVault (USDC spend policy enforced by contract on Arc).
+
+    Actions:
+    - 'policy': Read owner, agent, limits, period spend, pause state, and USDC balance.
+    - 'check': Ask the contract whether paying `amount_usdc` to `to_address` would succeed now.
+    - 'prepare_payment': Run the on-chain policy check, the native calldata gate, an `eth_call`
+      simulation from the agent address, and gas estimation; return an unsigned transaction
+      for the agent wallet to sign. Nothing is signed or broadcast by this server.
+
+    `amount_usdc` is a decimal string (e.g. "2.50"). `memo` is <= 32 bytes of text or a
+    0x-prefixed 32-byte hex value. `chain_id` defaults to Arc Mainnet (5042).
+    """
+    sim, vault, cid = _vault_context(vault_address, chain_id)
+    base: Dict[str, Any] = {"action": action, "vault_address": vault, "chain_id": cid}
+
+    if action == "policy":
+        policy = decode_policy(_vault_call(sim, vault, encode_policy()))
+        return {**base, **policy.to_dict()}
+
+    to = require_address(to_address, "to_address")
+    amount = parse_usdc(amount_usdc)
+    status, remaining = decode_check(_vault_call(sim, vault, encode_check(to, amount)))
+    base.update(
+        {
+            "to_address": to,
+            "amount": amount,
+            "amount_usdc": format_usdc(amount),
+            "vault_status": status.name,
+            "allowed": status == VaultStatus.OK,
+            "remaining_in_period": remaining,
+            "remaining_in_period_usdc": format_usdc(remaining),
+        }
+    )
+    if action == "check" or status != VaultStatus.OK:
+        if action == "prepare_payment":
+            base["ready"] = False
+            base["reason"] = f"Vault policy rejects this payment: {status.name}"
+        return base
+
+    if action != "prepare_payment":
+        raise ValueError(f"Unknown vault action {action!r}")
+
+    data = encode_pay(to, amount, memo)
+    policy = decode_policy(_vault_call(sim, vault, encode_policy()))
+    gate = _get_state().bridge.validate_transaction(to_address=vault, value_wei=0, gas_limit=0, calldata_hex=data)
+    if not gate.is_valid:
+        return {**base, "ready": False, "reason": f"Calldata gate rejected: {gate.reason}"}
+
+    tx: Dict[str, Any] = {"from": policy.agent, "to": vault, "data": data, "value": "0x0"}
+    try:
+        sim.eth_call(tx)
+    except RpcError as err:
+        raw = extract_revert_data(err.data)
+        reason = sim.decode_revert_reason(raw) if raw else str(err)
+        return {**base, "ready": False, "reason": f"Simulation reverted: {reason}"}
+    try:
+        gas_estimate = sim.estimate_gas(tx)
+    except (RpcError, ValueError, TypeError) as err:
+        return {**base, "ready": False, "reason": f"Gas estimation failed: {err}"}
+
+    gas_limit = gas_estimate * 12 // 10  # 20% headroom
+    return {
+        **base,
+        "ready": True,
+        "reason": "Policy check, calldata gate, and simulation passed",
+        "agent_address": policy.agent,
+        "gas_estimate": gas_estimate,
+        "unsigned_tx": {
+            "chainId": cid,
+            "from": policy.agent,
+            "to": vault,
+            "data": data,
+            "value": "0x0",
+            "gas": hex(gas_limit),
+        },
+    }
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
