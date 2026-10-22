@@ -8,11 +8,17 @@
 extern "C" {
 #endif
 
+// ABI version. Bump on any change to struct layout or exported signatures;
+// the Python bridge refuses to load a library with a mismatched version.
+constexpr uint32_t SENTINEL_ABI_VERSION = 2;
+
 // Power of 10 Compile-Time Constants
 constexpr size_t SENTINEL_MAX_CALLDATA_LEN = 32768;
 constexpr size_t SENTINEL_CACHE_CAPACITY = 1024;
 constexpr size_t SENTINEL_MAX_KEY_LEN = 128;
 constexpr size_t SENTINEL_MAX_VAL_LEN = 512;
+constexpr size_t SENTINEL_ADDRESS_LEN = 42; // "0x" + 40 hex characters
+constexpr size_t SENTINEL_SELECTOR_LEN = 4;
 constexpr uint64_t SENTINEL_MAX_GAS_LIMIT = 15000000ULL;
 // Value measured in Gwei (1 ETH = 10^9 Gwei) to prevent 64-bit integer overflow
 constexpr uint64_t SENTINEL_MAX_VALUE_GWEI = 100ULL * 1000000000ULL; // 100 ETH ceiling
@@ -27,7 +33,11 @@ enum SentinelStatusCode : int {
     SENTINEL_ERR_REENTRANCY_SIGNATURE = -5,
     SENTINEL_ERR_CACHE_FULL = -6,
     SENTINEL_ERR_CACHE_NOT_FOUND = -7,
-    SENTINEL_ERR_BUFFER_TOO_SMALL = -8
+    SENTINEL_ERR_BUFFER_TOO_SMALL = -8,
+    SENTINEL_ERR_INVALID_ADDRESS = -9,
+    SENTINEL_ERR_MALFORMED_CALLDATA = -10,
+    SENTINEL_ERR_INVALID_ARGUMENT = -11,
+    SENTINEL_ERR_NOT_INITIALIZED = -12
 };
 
 struct SentinelValidationResult {
@@ -41,7 +51,7 @@ struct SentinelValidationResult {
 struct SentinelCacheEntry {
     char key[SENTINEL_MAX_KEY_LEN];
     char value[SENTINEL_MAX_VAL_LEN];
-    uint64_t timestamp_ns;
+    uint64_t expires_at_ns; // 0 = never expires
     uint8_t is_valid;
 };
 
@@ -53,6 +63,9 @@ struct SentinelMemoryArena {
 };
 
 // Interface exports (C ABI)
+uint32_t sentinel_abi_version(void);
+size_t sentinel_arena_size(void);
+size_t sentinel_cache_capacity(void);
 int sentinel_init_arena(SentinelMemoryArena* arena);
 void sentinel_reset_arena(SentinelMemoryArena* arena);
 int sentinel_validate_tx(
@@ -67,11 +80,12 @@ int sentinel_cache_put(
     SentinelMemoryArena* arena,
     const char* key,
     const char* value,
-    uint64_t timestamp_ns
+    uint64_t expires_at_ns
 );
 int sentinel_cache_get(
     const SentinelMemoryArena* arena,
     const char* key,
+    uint64_t now_ns,
     char* out_value,
     size_t out_max_len
 );

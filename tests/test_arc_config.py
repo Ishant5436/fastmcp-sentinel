@@ -1,15 +1,14 @@
-import pytest
 from fastmcp_sentinel.config import (
     ARC_CHAIN_ID,
-    ARC_RPC_URL,
     ARC_GAS_TOKEN,
-    ARC_USDC_DECIMALS,
-    ARC_MAX_SINGLE_TX_BASE_UNITS,
     ARC_MAX_SESSION_SPEND_BASE_UNITS,
-    usdc_to_base_units,
+    ARC_MAX_SINGLE_TX_BASE_UNITS,
+    ARC_RPC_URL,
+    ARC_USDC_DECIMALS,
     base_units_to_usdc,
+    usdc_to_base_units,
 )
-from fastmcp_sentinel.server import sentinel_simulate_transaction, sentinel_agent_guard
+from fastmcp_sentinel.server import sentinel_agent_guard, sentinel_simulate_transaction
 
 
 def test_arc_network_constants():
@@ -30,8 +29,9 @@ def test_arc_usdc_conversions():
     assert base_units_to_usdc(500_000) == 0.5
 
 
-def test_arc_simulation_default_rpc():
+def test_arc_simulation_default_rpc(fake_rpc):
     """Verify that sentinel_simulate_transaction defaults to Arc Mainnet when RPC is omitted."""
+    fake_rpc({"eth_call": "0x", "eth_estimateGas": "0x5208"})
     res = sentinel_simulate_transaction(
         to_address="0x1111111111111111111111111111111111111111",
         data="0x",

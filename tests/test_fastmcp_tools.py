@@ -1,13 +1,14 @@
 import pytest
-import asyncio
+
 from fastmcp_sentinel.server import (
     mcp,
-    sentinel_validate_calldata,
-    sentinel_simulate_transaction,
-    sentinel_rpc_cache,
     sentinel_agent_guard,
     sentinel_audit_invariants,
+    sentinel_rpc_cache,
+    sentinel_simulate_transaction,
+    sentinel_validate_calldata,
 )
+
 
 @pytest.mark.anyio
 async def test_tool_registration():
@@ -21,6 +22,7 @@ async def test_tool_registration():
         "sentinel_audit_invariants",
     }
     assert expected.issubset(tool_names)
+
 
 def test_tool_validate_calldata():
     # Valid transfer
@@ -46,7 +48,8 @@ def test_tool_validate_calldata():
     assert res_bad["status_code"] == -3
     assert "exceeds 100 ETH ceiling" in res_bad["reason"]
 
-def test_tool_simulate_transaction():
+
+def test_tool_simulate_transaction(permissive_server):
     # Mock successful call
     res = sentinel_simulate_transaction(
         to_address="0x1111111111111111111111111111111111111111",
@@ -67,6 +70,7 @@ def test_tool_simulate_transaction():
     assert res_revert["success"] is False
     assert res_revert["revert_reason"] == "TransferFailed"
 
+
 def test_tool_rpc_cache():
     # Put
     res_put = sentinel_rpc_cache(action="put", key="eth_chainId", value="0x1")
@@ -82,13 +86,16 @@ def test_tool_rpc_cache():
     assert res_stats["capacity"] == 1024
     assert res_stats["count"] >= 1
 
-def test_tool_agent_guard():
+
+def test_tool_agent_guard(permissive_server):
     # Status
     st = sentinel_agent_guard(action="status")
     assert "max_session_spend_wei" in st
 
     # Check valid
-    chk = sentinel_agent_guard(action="check", to_address="0x1111111111111111111111111111111111111111", value_wei=10**17)
+    chk = sentinel_agent_guard(
+        action="check", to_address="0x1111111111111111111111111111111111111111", value_wei=10**17
+    )
     assert chk["allowed"] is True
 
     # Record
@@ -98,6 +105,7 @@ def test_tool_agent_guard():
     # Reset
     rst = sentinel_agent_guard(action="reset")
     assert rst["status"] == "reset"
+
 
 def test_tool_audit_invariants():
     report = sentinel_audit_invariants()
